@@ -1,0 +1,75 @@
+ARG BASE_IMAGE=flash-attention:r36.5.tegra-aarch64-cu126-22.04
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+WORKDIR /workspace/qi
+
+# System deps for editable installs, video IO, and OpenCV/Pillow runtime loading.
+RUN apt-get -o Acquire::Check-Date=false update && apt-get install -y --no-install-recommends \
+    git \
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    build-essential \
+    ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+# Reuse torch/CUDA/FlashAttention from the Jetson base image. Install only the
+# Python packages needed by the dry-run path and avoid pulling x86/cu128 torch.
+#
+# Simulator-only packages from pyproject.toml are intentionally omitted on
+# Jetson because this image is for local inference/dry-run, not simulation:
+#   sapien==3.0.3
+#   open3d==0.19.0
+#   h5py==3.16.0
+#   gymnasium==1.3.0
+#   mplib==0.2.1
+#   warp-lang==1.12.0
+#   toppra==0.6.3
+# torchcodec is intentionally omitted on Jetson: the dry-run path can use pyav,
+# and the base image index does not provide the older torchcodec==0.5 pin.
+RUN python3 -m pip install --no-cache-dir -U pip "setuptools<82" wheel && \
+    python3 -m pip install --no-cache-dir \
+      --index-url https://pypi.org/simple \
+      accelerate==1.12.0 \
+      av==16.0.1 \
+      boto3==1.35.99 \
+      datasets==3.6.0 \
+      einops==0.8.1 \
+      gitpython==3.1.45 \
+      huggingface-hub==0.29.2 \
+      hydra-core==1.3.2 \
+      imageio==2.37.0 \
+      imageio-ffmpeg==0.6.0 \
+      jsonlines==4.0.0 \
+      modelscope==1.34.0 \
+      numpy==1.26.4 \
+      omegaconf==2.3.0 \
+      packaging==25.0 \
+      pillow==12.0.0 \
+      pyarrow==23.0.0 \
+      regex==2025.11.3 \
+      rich==14.2.0 \
+      safetensors==0.5.3 \
+      termcolor==2.5.0 \
+      tqdm==4.66.5 \
+      transformers==4.49.0 \
+      typing-extensions==4.15.0
+
+RUN python3 -m pip install --no-cache-dir --no-deps \
+      torchvision==0.26.0
+
+COPY pyproject.toml ./
+COPY src/ src/
+COPY scripts/ scripts/
+COPY configs/ configs/
+COPY tests/data/ tests/data/
+
+ENV PYTHONPATH=/workspace/qi/src
+
+RUN python3 -m pip install --no-cache-dir --no-deps -e . && \
+    python3 -c "import torch; print('torch', torch.__version__); import torchvision; print('torchvision', torchvision.__version__); import qi; from qi.models.wan22.fastwam import FastWAM; print('Qi Jetson Docker image OK')"
+
+CMD ["/bin/bash"]
