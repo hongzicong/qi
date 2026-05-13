@@ -101,3 +101,11 @@ class FixedStepCacheState:
         self.last_compute_step = self.pending_compute_step
         self.pending_compute_step = None
         self.compute_count += 1
+
+    def update_residual(self, residual: torch.Tensor) -> None:
+        if self.pending_compute_step is None:
+            raise RuntimeError("`update_residual` called without a pending fixed-step cache computation.")
+        self.previous_residual = residual.detach()
+        self.last_compute_step = self.pending_compute_step
+        self.pending_compute_step = None
+        self.compute_count += 1

@@ -48,9 +48,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config-dir", default="configs")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--mixed-precision", choices=["no", "fp16", "bf16"], default="bf16")
+    parser.add_argument("--source", choices=["files"], default="files", help="Compatibility flag; this entrypoint runs files mode.")
     parser.add_argument("--output-dir", default="open_loop_video_dry_run")
     parser.add_argument("--prefix", default=None)
+    parser.add_argument("--num-video-frames", type=int, default=None)
+    parser.add_argument("--action-horizon", type=int, default=None)
     parser.add_argument("--num-inference-steps", type=int, default=10)
+    parser.add_argument(
+        "--profile-components",
+        action="store_true",
+        help="Profile infer_action encoder, video prefill, and action diffusion component timings.",
+    )
+    parser.add_argument(
+        "--cuda-graph-infer-action",
+        action="store_true",
+        help="Capture infer_action denoising with CUDA Graph. With --expert-cache, captures compute and reuse paths separately.",
+    )
+    parser.add_argument(
+        "--cuda-graph-warmup-steps",
+        type=int,
+        default=3,
+        help="Warmup iterations before capturing each infer_action CUDA graph.",
+    )
+    parser.add_argument(
+        "--torch-compile-infer-action",
+        action="store_true",
+        help="Compile infer_action compute/reuse tensor paths before optional CUDA Graph capture.",
+    )
+    parser.add_argument(
+        "--torch-compile-fullgraph",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Require fullgraph=True for infer_action tensor path compilation.",
+    )
     parser.add_argument(
         "--expert-cache",
         action="store_true",
@@ -87,9 +117,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rand-device", default="cpu")
     parser.add_argument("--fps", type=int, default=8)
     parser.add_argument("--tiled", action="store_true")
-    parser.add_argument("--no-cuda-graph", action="store_true", help="Disable CUDA Graph for action denoising (for baseline comparison).")
-    parser.add_argument("--torch-compile", action="store_true", help="Enable torch.compile on action expert inference (Inductor backend, default mode).")
-
+    parser.add_argument(
+        "--time-inference",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Print wall-clock inference time. Enabled by default.",
+    )
+    parser.add_argument("--use-text-encoder", action="store_true", default=True, help="Compatibility flag; text encoder is loaded.")
+    
     parser.add_argument("--cam-high", default=None)
     parser.add_argument("--cam-left-wrist", default=None)
     parser.add_argument("--cam-right-wrist", default=None)
@@ -217,8 +252,8 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
         dtype=model.torch_dtype,
     )
     proprio = normalize_proprio(processor, load_state_vector(args.state_json))
-    num_video_frames = default_num_video_frames(cfg)
-    action_horizon = default_action_horizon(cfg)
+    num_video_frames = int(args.num_video_frames or default_num_video_frames(cfg))
+    action_horizon = int(args.action_horizon or default_action_horizon(cfg))
     num_chunks = int(args.num_chunks)
     if num_chunks < 1:
         raise ValueError(f"--num-chunks must be >= 1, got {num_chunks}")
@@ -236,8 +271,9 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
     for chunk_idx in range(num_chunks):
         chunk_prefix = prefix if num_chunks == 1 else f"{prefix}_chunk{chunk_idx:02d}"
         chunk_seed = None if args.seed is None else int(args.seed) + chunk_idx
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
+        if args.time_inference:
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
 
         pred = model.infer(
             prompt=prompt,
@@ -255,15 +291,23 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
             rand_device=args.rand_device,
             tiled=args.tiled,
             expert_cache=args.expert_cache,
-            cuda_graph=not args.no_cuda_graph,
             expert_cache_reuse_steps=args.expert_cache_reuse_steps,
             expert_cache_warmup_steps=args.expert_cache_warmup_steps,
             expert_cache_cooldown_steps=args.expert_cache_cooldown_steps,
-            time_inference=True,
+            time_inference=args.time_inference,
+            profile_components=args.profile_components,
+            cuda_graph_infer_action=args.cuda_graph_infer_action,
+            cuda_graph_warmup_steps=args.cuda_graph_warmup_steps,
+            torch_compile_infer_action=args.torch_compile_infer_action,
+            torch_compile_fullgraph=args.torch_compile_fullgraph,
         )
 
-        torch.cuda.synchronize()
-        logger.info("Inference time (chunk %d): %.3f s", chunk_idx, time.perf_counter() - t0)
+        if args.time_inference:
+            torch.cuda.synchronize()
+            logger.info("Inference time (chunk %d): %.2f s", chunk_idx, time.perf_counter() - t0)
+
+        if args.profile_components and "component_profile" in pred:
+            logger.info("Component profile (chunk %d): %s", chunk_idx, pred["component_profile"])
 
         pred_frames = pred["video"]
         save_mp4(pred_frames, str(output_dir / f"{chunk_prefix}_pred.mp4"), fps=args.fps)
@@ -287,6 +331,9 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
                 "video_path": f"{chunk_prefix}_pred.mp4",
                 "input_path": f"{chunk_prefix}_input.png",
                 "pred_actions_path": f"{chunk_prefix}_pred_actions.json",
+                "cuda_graph_infer_action": bool(args.cuda_graph_infer_action),
+                "torch_compile_infer_action": bool(args.torch_compile_infer_action),
+                "component_profile": pred.get("component_profile") if args.profile_components else None,
             }
         )
 
@@ -310,6 +357,11 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
         "expert_cache_reuse_steps": int(args.expert_cache_reuse_steps),
         "expert_cache_warmup_steps": int(args.expert_cache_warmup_steps),
         "expert_cache_cooldown_steps": int(args.expert_cache_cooldown_steps),
+        "profile_components": bool(args.profile_components),
+        "cuda_graph_infer_action": bool(args.cuda_graph_infer_action),
+        "cuda_graph_warmup_steps": int(args.cuda_graph_warmup_steps),
+        "torch_compile_infer_action": bool(args.torch_compile_infer_action),
+        "torch_compile_fullgraph": bool(args.torch_compile_fullgraph),
         "seed": int(args.seed),
         "prompt": formatted_prompt,
         "state_json": args.state_json,
@@ -326,18 +378,6 @@ def run() -> None:
     setup_logging(log_level=logging.INFO)
     cfg = load_config(args)
     model = load_model(args, cfg)
-
-    if args.torch_compile:
-        import logging as _logging
-        _logging.getLogger("torch._dynamo").setLevel(_logging.WARNING)
-        logger.info("torch.compile enabled on MoT body forward (Inductor, default mode)")
-
-    if not args.no_cuda_graph or args.torch_compile:
-        model._setup_graph_mgr(torch_compile=args.torch_compile)
-        if not args.no_cuda_graph:
-            logger.info("CUDA Graph enabled (wraps MoT body only)")
-        else:
-            logger.info("CUDA Graph disabled, torch.compile only")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
