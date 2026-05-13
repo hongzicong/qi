@@ -48,13 +48,16 @@ Unlike general-purpose inference runtimes, Qi is designed around the unique dema
 
 ## Performance
 
-| Model Size | Hardware      | Latency (p50) | Latency (p99) | Throughput     |
-|------------|---------------|---------------|---------------|----------------|
-| 7B         | 1× H100       | 12 ms         | 18 ms         | 420 tok/s      |
-| 30B        | 4× H100       | 28 ms         | 41 ms         | 310 tok/s      |
-| 70B        | 8× H100       | 35 ms         | 52 ms         | 280 tok/s      |
+### A100
 
-*Benchmarked on action token generation with streaming output enabled. Results may vary by model architecture and hardware configuration.*
+| Metric | Baseline (ms) | + DiT Cache (ms) | Reduction |
+|--------|--------------|-----------------|-----------|
+| Mean   | 480        | 317           | −34.0%    |
+| P50    | 480        | 320           | −33.3%    |
+| P90    | 520        | 350           | −32.7%    |
+| P99    | 520        | 350           | −32.7%    |
+| Max    | 520        | 350           | −32.7%    |
+| Min    | 460        | 300           | −34.8%    |
 
 ---
 
