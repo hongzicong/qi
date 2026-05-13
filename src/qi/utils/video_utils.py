@@ -1,21 +1,38 @@
-from typing import Sequence
+from __future__ import annotations
 
+import os
+from typing import Iterable
+
+import imageio
 import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
 
+def _to_even_frame(frame: np.ndarray) -> np.ndarray:
+    h, w = frame.shape[:2]
+    pad_h = h % 2
+    pad_w = w % 2
+    if pad_h == 0 and pad_w == 0:
+        return frame
+    return np.pad(frame, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge")
 
-def pil_frames_to_video_tensor(frames: Sequence[Image.Image]) -> torch.Tensor:
-    if len(frames) == 0:
-        raise ValueError("`frames` must be non-empty.")
 
-    frame_tensors = []
-    for frame in frames:
-        arr = np.array(frame.convert("RGB"), dtype=np.float32) / 255.0
-        x = torch.from_numpy(arr).permute(2, 0, 1).contiguous()  # [3, H, W]
-        frame_tensors.append(x)
-    return torch.stack(frame_tensors, dim=1)  # [3, T, H, W]
+def save_mp4(frames: Iterable[Image.Image], path: str, fps: int = 8):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    writer = imageio.get_writer(
+        path,
+        fps=max(fps, 1),
+        codec="libx264",
+        format="FFMPEG",
+        pixelformat="yuv420p",
+    )
+    try:
+        for frame in frames:
+            arr = np.array(frame.convert("RGB"))
+            writer.append_data(_to_even_frame(arr))
+    finally:
+        writer.close()
 
 
 def _gaussian_kernel_2d(kernel_size: int, sigma: float, channels: int, device: torch.device, dtype: torch.dtype):
@@ -35,7 +52,6 @@ def video_psnr(pred: torch.Tensor, target: torch.Tensor, data_range: float = 1.0
     """
     if pred.shape != target.shape:
         raise ValueError(f"Shape mismatch: pred={tuple(pred.shape)} target={tuple(target.shape)}")
-
     pred = pred.float()
     target = target.float()
     mse = (pred - target).pow(2).mean(dim=(0, 2, 3))  # [T]

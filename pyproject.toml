@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "qi"
 version = "0.1.0"
-description = "FastWAM: standalone Wan2.2-TI2V-5B training/inference package"
+description = "A High-Performance Real-Time Inference Engine for World Action Models"
 requires-python = ">=3.10"
 dependencies = [
   "accelerate==1.12.0",
@@ -30,9 +30,7 @@ dependencies = [
   "rich==14.2.0",
   "safetensors==0.5.3",
   "termcolor==2.5.0",
-  "torch==2.7.1+cu128",
   "torchcodec==0.5",
-  "torchvision==0.22.1+cu128",
   "tqdm==4.66.5",
   "transformers==4.49.0",
   "typing-extensions==4.15.0",
