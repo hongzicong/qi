@@ -55,11 +55,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-horizon", type=int, default=None)
     parser.add_argument("--num-inference-steps", type=int, default=10)
     parser.add_argument(
-        "--profile-components",
-        action="store_true",
-        help="Profile infer_action encoder, video prefill, and action diffusion component timings.",
-    )
-    parser.add_argument(
         "--cuda-graph-infer-action",
         action="store_true",
         help="Capture infer_action denoising with CUDA Graph. With --expert-cache, captures compute and reuse paths separately.",
@@ -295,7 +290,6 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
             expert_cache_warmup_steps=args.expert_cache_warmup_steps,
             expert_cache_cooldown_steps=args.expert_cache_cooldown_steps,
             time_inference=args.time_inference,
-            profile_components=args.profile_components,
             cuda_graph_infer_action=args.cuda_graph_infer_action,
             cuda_graph_warmup_steps=args.cuda_graph_warmup_steps,
             torch_compile_infer_action=args.torch_compile_infer_action,
@@ -305,9 +299,6 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
         if args.time_inference:
             torch.cuda.synchronize()
             logger.info("Inference time (chunk %d): %.2f s", chunk_idx, time.perf_counter() - t0)
-
-        if args.profile_components and "component_profile" in pred:
-            logger.info("Component profile (chunk %d): %s", chunk_idx, pred["component_profile"])
 
         pred_frames = pred["video"]
         save_mp4(pred_frames, str(output_dir / f"{chunk_prefix}_pred.mp4"), fps=args.fps)
@@ -333,7 +324,6 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
                 "pred_actions_path": f"{chunk_prefix}_pred_actions.json",
                 "cuda_graph_infer_action": bool(args.cuda_graph_infer_action),
                 "torch_compile_infer_action": bool(args.torch_compile_infer_action),
-                "component_profile": pred.get("component_profile") if args.profile_components else None,
             }
         )
 
@@ -357,7 +347,6 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
         "expert_cache_reuse_steps": int(args.expert_cache_reuse_steps),
         "expert_cache_warmup_steps": int(args.expert_cache_warmup_steps),
         "expert_cache_cooldown_steps": int(args.expert_cache_cooldown_steps),
-        "profile_components": bool(args.profile_components),
         "cuda_graph_infer_action": bool(args.cuda_graph_infer_action),
         "cuda_graph_warmup_steps": int(args.cuda_graph_warmup_steps),
         "torch_compile_infer_action": bool(args.torch_compile_infer_action),

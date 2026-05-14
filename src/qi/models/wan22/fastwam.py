@@ -853,14 +853,12 @@ class FastWAM(torch.nn.Module):
         expert_cache_cooldown_steps: int = 1,
         test_action_with_infer_action: bool = True,
         time_inference: bool = False,
-        profile_components: bool = False,
         cuda_graph_infer_action: bool = False,
         cuda_graph_warmup_steps: int = 3,
         torch_compile_infer_action: bool = False,
         torch_compile_fullgraph: bool = True,
     ) -> dict[str, Any]:
         self.eval()
-        component_profile: dict[str, Any] = {}
         if test_action_with_infer_action:
             if seed is None:
                 raise ValueError("`test_action_with_infer_action=True` requires non-null `seed`.")
@@ -885,13 +883,10 @@ class FastWAM(torch.nn.Module):
                 expert_cache_cooldown_steps=expert_cache_cooldown_steps,
                 cuda_graph=cuda_graph_infer_action,
                 cuda_graph_warmup_steps=cuda_graph_warmup_steps,
-                profile_components=profile_components,
                 torch_compile_infer_action=torch_compile_infer_action,
                 torch_compile_fullgraph=torch_compile_fullgraph,
             )
             action_only_out = action_only_result["action"]
-            if profile_components and "component_profile" in action_only_result:
-                component_profile["infer_action"] = action_only_result["component_profile"]
             if time_inference:
                 torch.cuda.synchronize()
                 logger.info("infer_action time: %.2f s", time.perf_counter() - _t_action)
@@ -1045,13 +1040,10 @@ class FastWAM(torch.nn.Module):
                     f"Action from infer_joint and infer_action differ with max abs diff {max_abs_diff:.6f}. "
                 )
 
-        output = {
+        return {
             "video": self._decode_latents(latents_video, tiled=tiled),
             "action": action_out,
         }
-        if profile_components:
-            output["component_profile"] = component_profile
-        return output
 
     def _infer_action_compute_step(
         self,
@@ -1128,26 +1120,29 @@ class FastWAM(torch.nn.Module):
         if not hasattr(self, "_infer_action_torch_compile_cache"):
             self._infer_action_torch_compile_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
 
-        compile_mode = "max-autotune-no-cudagraphs"
-        cache_key = (compile_mode, bool(fullgraph))
+        compile_options = {
+            "max_autotune": True,
+            "coordinate_descent_tuning": True,
+        }
+        cache_key = (tuple(sorted(compile_options.items())), bool(fullgraph))
         cached = self._infer_action_torch_compile_cache.setdefault(cache_key, {})
         compile_kwargs = {
-            "mode": compile_mode,
+            "options": compile_options,
             "fullgraph": bool(fullgraph),
             "dynamic": False,
         }
         if "compute" not in cached:
             cached["compute"] = torch.compile(self._infer_action_compute_step, **compile_kwargs)
             logger.info(
-                "Compiled infer_action compute path with torch.compile(mode=%s, fullgraph=%s, inductor_cuda_graphs=False).",
-                compile_mode,
+                "Compiled infer_action compute path with torch.compile(options=%s, fullgraph=%s).",
+                compile_options,
                 bool(fullgraph),
             )
         if compile_reuse and "reuse" not in cached:
             cached["reuse"] = torch.compile(self._infer_action_reuse_step, **compile_kwargs)
             logger.info(
-                "Compiled infer_action reuse path with torch.compile(mode=%s, fullgraph=%s, inductor_cuda_graphs=False).",
-                compile_mode,
+                "Compiled infer_action reuse path with torch.compile(options=%s, fullgraph=%s).",
+                compile_options,
                 bool(fullgraph),
             )
         return cached["compute"], cached.get("reuse", self._infer_action_reuse_step)
@@ -1174,12 +1169,10 @@ class FastWAM(torch.nn.Module):
         expert_cache_cooldown_steps: int = 1,
         cuda_graph: bool = False,
         cuda_graph_warmup_steps: int = 3,
-        profile_components: bool = False,
         torch_compile_infer_action: bool = False,
         torch_compile_fullgraph: bool = True,
     ) -> dict[str, Any]:
         self.eval()
-        component_profile: dict[str, Any] = {}
         if cuda_graph:
             if self.device.type != "cuda":
                 raise ValueError("`cuda_graph=True` for infer_action requires a CUDA device.")
@@ -1228,17 +1221,7 @@ class FastWAM(torch.nn.Module):
 
         input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
 
-        if profile_components:
-            encoder_start = torch.cuda.Event(enable_timing=True)
-            encoder_end = torch.cuda.Event(enable_timing=True)
-            encoder_start.record()
-
         first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
-
-        if profile_components:
-            encoder_end.record()
-            torch.cuda.synchronize()
-            component_profile["encoder_ms"] = float(encoder_start.elapsed_time(encoder_end))
 
         fuse_flag = bool(getattr(self.video_expert, "fuse_vae_embedding_in_latents", False))
 
@@ -1271,11 +1254,6 @@ class FastWAM(torch.nn.Module):
                 proprio=proprio,
             )
 
-        if profile_components:
-            video_prefill_start = torch.cuda.Event(enable_timing=True)
-            video_prefill_end = torch.cuda.Event(enable_timing=True)
-            video_prefill_start.record()
-
         timestep_video = torch.zeros(
             (first_frame_latents.shape[0],),
             dtype=first_frame_latents.dtype,
@@ -1306,13 +1284,6 @@ class FastWAM(torch.nn.Module):
             },
             video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
         )
-
-        if profile_components:
-            video_prefill_end.record()
-            torch.cuda.synchronize()
-            component_profile["video_dit_prefill_ms"] = float(
-                video_prefill_start.elapsed_time(video_prefill_end)
-            )
 
         infer_timesteps_action, infer_deltas_action = self.infer_action_scheduler.build_inference_schedule(
             num_inference_steps=num_inference_steps,
@@ -1511,11 +1482,6 @@ class FastWAM(torch.nn.Module):
         if cuda_graph:
             graph_state = _get_infer_action_graph_state()
 
-        if profile_components:
-            action_dit_start = torch.cuda.Event(enable_timing=True)
-            action_dit_end = torch.cuda.Event(enable_timing=True)
-            action_dit_start.record()
-
         for step_idx, (step_t_action, step_delta_action) in enumerate(
             zip(infer_timesteps_action, infer_deltas_action)
         ):
@@ -1571,24 +1537,6 @@ class FastWAM(torch.nn.Module):
 
             latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
 
-        if profile_components:
-            action_dit_end.record()
-            torch.cuda.synchronize()
-            action_dit_ms = float(action_dit_start.elapsed_time(action_dit_end))
-            component_profile["action_dit_diffusion_ms"] = action_dit_ms
-            component_profile["action_dit_avg_step_ms"] = action_dit_ms / max(int(num_inference_steps), 1)
-            component_profile["num_inference_steps"] = int(num_inference_steps)
-            component_profile["expert_cache"] = int(expert_cache)
-            component_profile["cuda_graph"] = int(cuda_graph)
-            component_profile["torch_compile"] = int(torch_compile_infer_action)
-            component_profile["torch_compile_fullgraph"] = bool(torch_compile_fullgraph)
-            component_profile["torch_compile_inductor_cudagraphs"] = 0
-            component_profile["cuda_graph_compute_replays"] = int(compute_graph_replays)
-            component_profile["cuda_graph_reuse_replays"] = int(reuse_graph_replays)
-            if action_expert_cache is not None:
-                component_profile["expert_cache_compute_count"] = int(action_expert_cache.compute_count)
-                component_profile["expert_cache_reuse_count"] = int(action_expert_cache.reuse_count)
-
         if cuda_graph:
             logger.info(
                 "infer_action CUDA graph replays: compute=%d, reuse=%d.",
@@ -1599,8 +1547,6 @@ class FastWAM(torch.nn.Module):
         output = {
             "action": latents_action[0].detach().to(device="cpu", dtype=torch.float32),
         }
-        if profile_components:
-            output["component_profile"] = component_profile
         return output
 
     @torch.inference_mode()
@@ -1627,7 +1573,6 @@ class FastWAM(torch.nn.Module):
         expert_cache_warmup_steps: int = 1,
         expert_cache_cooldown_steps: int = 1,
         time_inference: bool = False,
-        profile_components: bool = False,
         cuda_graph_infer_action: bool = False,
         cuda_graph_warmup_steps: int = 3,
         torch_compile_infer_action: bool = False,
@@ -1654,7 +1599,6 @@ class FastWAM(torch.nn.Module):
             expert_cache_warmup_steps=expert_cache_warmup_steps,
             expert_cache_cooldown_steps=expert_cache_cooldown_steps,
             time_inference=time_inference,
-            profile_components=profile_components,
             cuda_graph_infer_action=cuda_graph_infer_action,
             cuda_graph_warmup_steps=cuda_graph_warmup_steps,
             torch_compile_infer_action=torch_compile_infer_action,
