@@ -184,10 +184,12 @@ class FastWAM(torch.nn.Module):
         return model
 
     def to(self, *args, **kwargs):
+        # text_encoder is managed separately (CPU-only except during encode_prompt)
+        te = self._modules.pop("text_encoder", None)
         super().to(*args, **kwargs)
+        if te is not None:
+            self._modules["text_encoder"] = te
         self.mot.to(*args, **kwargs)
-        if self.text_encoder is not None:
-            self.text_encoder.to(*args, **kwargs)
         self.vae.to(*args, **kwargs)
         return self
 
@@ -214,12 +216,17 @@ class FastWAM(torch.nn.Module):
         if cache_key in self._encode_prompt_cache:
             return self._encode_prompt_cache[cache_key]
         ids, mask = self.tokenizer(prompt, return_mask=True, add_special_tokens=True)
+        self.mot.to("cpu")
+        self.vae.to("cpu")
+        torch.cuda.empty_cache()
         self.text_encoder.to(self.device)
         ids = ids.to(self.device)
         mask = mask.to(self.device, dtype=torch.bool)
         prompt_emb = self.text_encoder(ids, mask)
         self.text_encoder.to("cpu")
         torch.cuda.empty_cache()
+        self.mot.to(self.device)
+        self.vae.to(self.device)
         # FIXME: original implementation's zero padding is visible in cross-attn.
         seq_lens = mask.gt(0).sum(dim=1).long()
         for i, v in enumerate(seq_lens):

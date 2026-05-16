@@ -193,7 +193,7 @@ def load_wan22_ti2v_5b_components(
             text_config.path,
             "wan_video_text_encoder",
             torch_dtype=torch_dtype,
-            device=device,
+            device="cpu",
         )
         tokenizer = HuggingfaceTokenizer(
             name=tokenizer_config.path,
