@@ -44,6 +44,7 @@ runai bash job-ae3fb1f7996c
 
 ```bash
 export DIFFSYNTH_MODEL_BASE_PATH=/home/zihong/pvc/checkpoints
+export OUTPUT_PATH=/home/zihong/pvc/output
 ```
 
 ## Download Pretrained Checkpoints from HuggingFace
@@ -78,7 +79,7 @@ python scripts/dry_run.py \
   --state-json ./tests/data/state.json \
   --prompt "Pick and place the numbered blocks 9, 1, 5, 11, and 4 to the lower area in order." \
   --use-text-encoder \
-  --output-dir ./open_loop_video_dry_run/files_test \
+  --output-dir $OUTPUT_PATH/dry_run_result \
   --num-inference-steps 10 \
   --num-chunks 10 \
   --time-inference \
