@@ -201,13 +201,18 @@ class FastWAM(torch.nn.Module):
             num_frames = (num_frames + 3) // 4 * 4 + 1
         return height, width, num_frames
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def encode_prompt(self, prompt: Union[str, Sequence[str]]):
         if self.text_encoder is None or self.tokenizer is None:
             raise ValueError(
                 "Prompt encoding requires loaded text encoder/tokenizer. "
                 "Set `load_text_encoder=true` or provide precomputed `context/context_mask`."
             )
+        cache_key = prompt if isinstance(prompt, str) else tuple(prompt)
+        if not hasattr(self, "_encode_prompt_cache"):
+            self._encode_prompt_cache: dict = {}
+        if cache_key in self._encode_prompt_cache:
+            return self._encode_prompt_cache[cache_key]
         ids, mask = self.tokenizer(prompt, return_mask=True, add_special_tokens=True)
         self.text_encoder.to(self.device)
         ids = ids.to(self.device)
@@ -220,7 +225,9 @@ class FastWAM(torch.nn.Module):
         for i, v in enumerate(seq_lens):
             prompt_emb[i, v:] = 0
         mask = torch.ones_like(mask)
-        return prompt_emb.to(device=self.device), mask
+        result = (prompt_emb.to(device=self.device), mask)
+        self._encode_prompt_cache[cache_key] = result
+        return result
 
     def _append_proprio_to_context(
         self,
@@ -245,7 +252,7 @@ class FastWAM(torch.nn.Module):
             torch.cat([context_mask, proprio_mask], dim=1),
         )
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _encode_video_latents(self, video_tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
         z = self.vae.encode(
             video_tensor,
@@ -256,7 +263,7 @@ class FastWAM(torch.nn.Module):
         )
         return z
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _encode_input_image_latents_tensor(self, input_image: torch.Tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
         if input_image.ndim == 3:
             input_image = input_image.unsqueeze(0)
@@ -388,7 +395,7 @@ class FastWAM(torch.nn.Module):
             "image_is_pad": image_is_pad,
         }
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _build_mot_attention_mask(
         self,
         video_seq_len: int,
@@ -573,7 +580,7 @@ class FastWAM(torch.nn.Module):
         }
         return loss_total, loss_dict
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _predict_joint_noise(
         self,
         latents_video: torch.Tensor,
@@ -637,7 +644,7 @@ class FastWAM(torch.nn.Module):
         pred_action = self.action_expert.post_dit(tokens_out["action"], action_pre)
         return pred_video, pred_action
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _predict_action_noise(
         self,
         first_frame_latents: torch.Tensor,
@@ -697,7 +704,7 @@ class FastWAM(torch.nn.Module):
         pred_action = self.action_expert.post_dit(tokens_out["action"], action_pre)
         return pred_action
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _predict_action_noise_with_cache(
         self,
         latents_action: torch.Tensor,
@@ -728,7 +735,7 @@ class FastWAM(torch.nn.Module):
         )
         return self.action_expert.post_dit(action_tokens, action_pre)
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def infer_joint(
         self,
         prompt: Optional[str],
@@ -908,7 +915,7 @@ class FastWAM(torch.nn.Module):
             "action": action_out,
         }
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def infer_action(
         self,
         prompt: Optional[str],
