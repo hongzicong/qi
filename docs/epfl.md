@@ -4,7 +4,7 @@
 
 ```bash
 # Build base (only when dependencies change)
-docker build --platform linux/amd64 -f ./docker/Dockerfile.epfl.base \
+docker build --platform linux/amd64 -f ./docker/Dockerfile.base \
     --tag registry.rcp.epfl.ch/dcl-zihong/qi-base:latest .
 
 # Build app (every time code changes)

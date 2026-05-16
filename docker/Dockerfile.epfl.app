@@ -18,6 +18,4 @@ WORKDIR /home/${LDAP_USERNAME}/qi
 # Install the package
 RUN pip install -e .
 
-ENV DIFFSYNTH_MODEL_BASE_PATH=/home/${LDAP_USERNAME}/qi/checkpoints
-
 USER ${LDAP_USERNAME}
