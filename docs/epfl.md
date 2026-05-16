@@ -65,7 +65,7 @@ python scripts/preprocess_action_dit_backbone.py \
   --dtype bfloat16
 ```
 
-## Run Open-Loop Video Dry Run (Single Sample, 10 Diffusion Steps)
+## Run Open-Loop Video Dry Run (10 Diffusion Steps, 10 Chunks)
 
 ```bash
 python scripts/dry_run.py \
@@ -80,6 +80,7 @@ python scripts/dry_run.py \
   --use-text-encoder \
   --output-dir ./open_loop_video_dry_run/files_test \
   --num-inference-steps 10 \
+  --num-chunks 10 \
   --time-inference \
   --seed 42
 ```

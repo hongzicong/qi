@@ -56,6 +56,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-video-frames", type=int, default=None)
     parser.add_argument("--action-horizon", type=int, default=None)
     parser.add_argument("--num-inference-steps", type=int, default=10)
+    parser.add_argument(
+        "--num-chunks",
+        type=int,
+        default=1,
+        help=(
+            "Files mode only: repeatedly generate this many chunks. "
+            "Each chunk after the first uses the previous predicted last frame as the new condition image."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--rand-device", default="cpu")
     parser.add_argument("--fps", type=int, default=8)
@@ -268,6 +277,13 @@ def tensor_video_to_pil_frames(video: torch.Tensor, value_range: str) -> list[Im
 def save_input_image(input_image: torch.Tensor, path: Path) -> None:
     frame = input_image.detach().float().cpu().squeeze(0)
     tensor_video_to_pil_frames(frame.unsqueeze(1), "minus_one_one")[0].save(path)
+
+
+def pil_frame_to_input_image(frame: Image.Image, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    arr = np.asarray(frame.convert("RGB"), dtype=np.float32)
+    image = torch.from_numpy(arr).permute(2, 0, 1).contiguous() / 255.0
+    image = image.mul(2.0).sub(1.0)
+    return image.unsqueeze(0).to(device=device, dtype=dtype)
 
 
 def add_label(frame: Image.Image, label: str) -> Image.Image:
@@ -611,6 +627,9 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
     proprio = normalize_proprio(processor, load_state_vector(args.state_json))
     num_video_frames = int(args.num_video_frames or default_num_video_frames(cfg))
     action_horizon = int(args.action_horizon or default_action_horizon(cfg))
+    num_chunks = int(args.num_chunks)
+    if num_chunks < 1:
+        raise ValueError(f"--num-chunks must be >= 1, got {num_chunks}")
 
     formatted_prompt = DEFAULT_PROMPT.format(task=args.prompt)
     prompt: str | None = formatted_prompt
@@ -624,49 +643,85 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
         context, context_mask = load_cached_context(cache_dir, formatted_prompt, context_len)
         prompt = None
 
-    if args.time_inference:
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
+    rollout_frames: list[Image.Image] = []
+    rollout_actions: list[torch.Tensor] = []
+    chunk_metrics: list[dict[str, Any]] = []
+    current_input = input_image
 
-    pred = model.infer(
-        prompt=prompt,
-        input_image=input_image,
-        num_frames=num_video_frames,
-        action=None,
-        action_horizon=action_horizon,
-        proprio=proprio,
-        context=context,
-        context_mask=context_mask,
-        text_cfg_scale=1.0,
-        action_cfg_scale=1.0,
-        num_inference_steps=args.num_inference_steps,
-        seed=args.seed,
-        rand_device=args.rand_device,
-        tiled=args.tiled,
-    )
+    for chunk_idx in range(num_chunks):
+        chunk_prefix = prefix if num_chunks == 1 else f"{prefix}_chunk{chunk_idx:02d}"
+        chunk_seed = None if args.seed is None else int(args.seed) + chunk_idx
+        if args.time_inference:
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
 
-    if args.time_inference:
-        torch.cuda.synchronize()
-        logger.info("Inference time: %.2f s", time.perf_counter() - t0)
+        pred = model.infer(
+            prompt=prompt,
+            input_image=current_input,
+            num_frames=num_video_frames,
+            action=None,
+            action_horizon=action_horizon,
+            proprio=proprio,
+            context=context,
+            context_mask=context_mask,
+            text_cfg_scale=1.0,
+            action_cfg_scale=1.0,
+            num_inference_steps=args.num_inference_steps,
+            seed=chunk_seed,
+            rand_device=args.rand_device,
+            tiled=args.tiled,
+        )
 
-    pred_frames = pred["video"]
-    save_mp4(pred_frames, str(output_dir / f"{prefix}_pred.mp4"), fps=args.fps)
-    save_input_image(input_image, output_dir / f"{prefix}_input.png")
-    save_actions(
-        pred.get("action"),
-        output_dir=output_dir,
-        prefix=prefix,
-        processor=processor,
-        proprio=proprio,
-    )
+        if args.time_inference:
+            torch.cuda.synchronize()
+            logger.info("Inference time (chunk %d): %.2f s", chunk_idx, time.perf_counter() - t0)
+
+        pred_frames = pred["video"]
+        save_mp4(pred_frames, str(output_dir / f"{chunk_prefix}_pred.mp4"), fps=args.fps)
+        save_input_image(current_input, output_dir / f"{chunk_prefix}_input.png")
+        pred_action_denorm = save_actions(
+            pred.get("action"),
+            output_dir=output_dir,
+            prefix=chunk_prefix,
+            processor=processor,
+            proprio=proprio,
+        )
+        if pred_action_denorm is not None:
+            rollout_actions.append(pred_action_denorm)
+
+        rollout_frames.extend(pred_frames if chunk_idx == 0 else pred_frames[1:])
+        current_input = pil_frame_to_input_image(pred_frames[-1], device=model.device, dtype=model.torch_dtype)
+        chunk_metrics.append(
+            {
+                "chunk_index": chunk_idx,
+                "seed": chunk_seed,
+                "video_path": f"{chunk_prefix}_pred.mp4",
+                "input_path": f"{chunk_prefix}_input.png",
+                "pred_actions_path": f"{chunk_prefix}_pred_actions.json",
+            }
+        )
+
+    if num_chunks > 1:
+        save_mp4(rollout_frames, str(output_dir / f"{prefix}_rollout_pred.mp4"), fps=args.fps)
+        if rollout_actions:
+            action_rollout = torch.cat(rollout_actions, dim=0)
+            action_np = action_rollout.detach().cpu().numpy().astype(np.float32)
+            np.save(output_dir / f"{prefix}_rollout_pred_actions.npy", action_np)
+            with open(output_dir / f"{prefix}_rollout_pred_actions.json", "w", encoding="utf-8") as file:
+                json.dump({"action": action_np.tolist()}, file, ensure_ascii=False, indent=2)
 
     metrics = {
         "source": "files",
         "num_video_frames": num_video_frames,
         "action_horizon": action_horizon,
+        "num_chunks": num_chunks,
+        "rollout_conditioning": "previous chunk last predicted frame",
         "num_inference_steps": int(args.num_inference_steps),
         "seed": int(args.seed),
         "prompt": formatted_prompt,
+        "state_json": args.state_json,
+        "used_zero_state": args.state_json is None,
+        "chunks": chunk_metrics,
     }
     with open(output_dir / f"{prefix}_metrics.json", "w", encoding="utf-8") as file:
         json.dump(metrics, file, ensure_ascii=False, indent=2)
