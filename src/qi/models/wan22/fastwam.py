@@ -178,6 +178,9 @@ class FastWAM(torch.nn.Module):
                 "SKIPPED_PRETRAIN" if skip_dit_load_from_pretrain else action_dit_pretrained_path
             ),
         }
+        if model.text_encoder is not None:
+            model.text_encoder.to("cpu")
+            torch.cuda.empty_cache()
         return model
 
     def to(self, *args, **kwargs):
@@ -206,9 +209,12 @@ class FastWAM(torch.nn.Module):
                 "Set `load_text_encoder=true` or provide precomputed `context/context_mask`."
             )
         ids, mask = self.tokenizer(prompt, return_mask=True, add_special_tokens=True)
+        self.text_encoder.to(self.device)
         ids = ids.to(self.device)
         mask = mask.to(self.device, dtype=torch.bool)
         prompt_emb = self.text_encoder(ids, mask)
+        self.text_encoder.to("cpu")
+        torch.cuda.empty_cache()
         # FIXME: original implementation's zero padding is visible in cross-attn.
         seq_lens = mask.gt(0).sum(dim=1).long()
         for i, v in enumerate(seq_lens):
