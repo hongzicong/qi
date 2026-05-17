@@ -218,13 +218,11 @@ class FastWAM(torch.nn.Module):
         ids, mask = self.tokenizer(prompt, return_mask=True, add_special_tokens=True)
         self.mot.to("cpu")
         self.vae.to("cpu")
-        torch.cuda.empty_cache()
         self.text_encoder.to(self.device)
         ids = ids.to(self.device)
         mask = mask.to(self.device, dtype=torch.bool)
         prompt_emb = self.text_encoder(ids, mask)
         self.text_encoder.to("cpu")
-        torch.cuda.empty_cache()
         self.mot.to(self.device)
         self.vae.to(self.device)
         # FIXME: original implementation's zero padding is visible in cross-attn.
