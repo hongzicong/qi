@@ -1,10 +1,12 @@
-FROM ...
+FROM qi-base:latest
 
 # Copy code
-COPY . /home/${LDAP_USERNAME}/qi/
-RUN chown -R ${LDAP_USERNAME}:${LDAP_GROUPNAME} /home/${LDAP_USERNAME}
+COPY . /root/qi/
+RUN chown -R root:root /root/qi
 
-WORKDIR /home/${LDAP_USERNAME}/qi
+WORKDIR /root/qi
 
-# Install the package
-RUN pip install -e .
+# Install the package (torch/torchvision already installed in base)
+RUN pip install -e . 
+
+USER root
