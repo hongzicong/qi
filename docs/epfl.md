@@ -50,20 +50,11 @@ export OUTPUT_PATH=/home/zihong/pvc/output
 ## Download Pretrained Checkpoints from HuggingFace
 
 ```bash
-huggingface-cli download yuanty/fastwam \
-  robotwin_uncond_3cam_384.pt \
-  robotwin_uncond_3cam_384_dataset_stats.json \
-  --local-dir $DIFFSYNTH_MODEL_BASE_PATH/fastwam_release
-```
-
-## pre-generate the ActionDiT backbone (interpolated from Wan22 DiT)
-
-```bash
-python scripts/preprocess_action_dit_backbone.py \
-  --model-config configs/model/fastwam.yaml \
-  --output $DIFFSYNTH_MODEL_BASE_PATH/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt \
-  --device cuda \
-  --dtype bfloat16
+huggingface-cli download m1ku2/fastwam_pick_numbered_blocks \
+  step_008140.pt \
+  ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt \
+  dataset_stats.json \
+  --local-dir $DIFFSYNTH_MODEL_BASE_PATH
 ```
 
 ## Run Open-Loop Video Dry Run (10 Diffusion Steps, 10 Chunks)
@@ -71,8 +62,8 @@ python scripts/preprocess_action_dit_backbone.py \
 ```bash
 python scripts/dry_run.py \
   --source files \
-  --ckpt $DIFFSYNTH_MODEL_BASE_PATH/fastwam_release/robotwin_uncond_3cam_384.pt \
-  --dataset-stats $DIFFSYNTH_MODEL_BASE_PATH/fastwam_release/robotwin_uncond_3cam_384_dataset_stats.json \
+  --ckpt $DIFFSYNTH_MODEL_BASE_PATH/step_008140.pt \
+  --dataset-stats $DIFFSYNTH_MODEL_BASE_PATH/dataset_stats.json \
   --cam-high ./tests/data/cam_high.png \
   --cam-left-wrist ./tests/data/cam_left_wrist.png \
   --cam-right-wrist ./tests/data/cam_right_wrist.png \

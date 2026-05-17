@@ -77,7 +77,9 @@ Unlike general-purpose inference runtimes, Qi is designed around the unique dema
 
 ## Roadmap
 
-- [x] Edge deployment (Jetson Orin & 4090)
+- [x] Edge deployment
+  - [x] NVIDIA RTX 4090
+  - [ ] NVIDIA Jetson Orin
 - [ ] Kernel optimization
   - [ ] Cuda graph
   - [ ] torch.compile
@@ -85,42 +87,6 @@ Unlike general-purpose inference runtimes, Qi is designed around the unique dema
 - [ ] DiT caching
 - [ ] Streaming action generation
 - [ ] World-action model zoo
-
----
-
-## Contributors
-
-<table>
-<tr>
-  <td align="center">
-    <b>Haodong Wang</b>
-  </td>
-  <td align="center">
-    <a href="https://github.com/yangye3058845465-sys">
-      <img src="https://github.com/yangye3058845465-sys.png" width="80px" alt="Ye Yang"/><br/>
-      <b>Ye Yang</b>
-    </a>
-  </td>
-  <td align="center">
-    <a href="https://github.com/Alert-M">
-      <img src="https://github.com/Alert-M.png" width="80px" alt="Jiawei You"/><br/>
-      <b>Jiawei You</b>
-    </a>
-  </td>
-  <td align="center">
-    <a href="https://github.com/linjian-tech">
-      <img src="https://github.com/linjian-tech.png" width="80px" alt="Jian Lin"/><br/>
-      <b>Jian Lin</b>
-    </a>
-  </td>
-  <td align="center">
-    <a href="https://github.com/hongzicong">
-      <img src="https://github.com/hongzicong.png" width="80px" alt="Zicong Hong"/><br/>
-      <b>Zicong Hong</b>
-    </a>
-  </td>
-</tr>
-</table>
 
 ---
 
