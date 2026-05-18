@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 
+from qi.dit_cache import FixedStepCacheState
 from qi.utils.logging_config import get_logger
 
 from .action_dit import ActionDiT
@@ -424,6 +425,69 @@ class FastWAM(torch.nn.Module):
         mask[video_seq_len:, :first_frame_tokens] = True
         return mask
 
+    def _make_action_expert_cache(
+        self,
+        *,
+        enabled: bool,
+        num_inference_steps: int,
+        reuse_steps: int,
+        warmup_steps: int,
+        cooldown_steps: int,
+    ) -> Optional[FixedStepCacheState]:
+        if not enabled:
+            return None
+        return FixedStepCacheState.from_values(
+            num_steps=num_inference_steps,
+            reuse_steps=reuse_steps,
+            warmup_steps=warmup_steps,
+            cooldown_steps=cooldown_steps,
+        )
+
+    @staticmethod
+    def _log_action_expert_cache(cache: Optional[FixedStepCacheState]) -> None:
+        if cache is None:
+            return
+        logger.info(
+            "Action expert fixed-step cache reused %d/%d denoising steps (body computes=%d).",
+            cache.reuse_count,
+            cache.num_steps,
+            cache.compute_count,
+        )
+
+    def _run_action_body_with_video_cache(
+        self,
+        *,
+        action_pre: dict[str, Any],
+        video_kv_cache: list[dict[str, torch.Tensor]],
+        attention_mask: torch.Tensor,
+        video_seq_len: int,
+        expert_cache_state: Optional[FixedStepCacheState] = None,
+        expert_cache_step: Optional[int] = None,
+    ) -> torch.Tensor:
+        body_input = action_pre["tokens"]
+        if expert_cache_state is not None:
+            if expert_cache_step is None:
+                raise ValueError("`expert_cache_step` is required when `expert_cache_state` is enabled.")
+            decision = expert_cache_state.begin_step(expert_cache_step)
+            if decision.should_reuse:
+                return expert_cache_state.reuse(body_input)
+
+        body_output = self.mot.forward_action_with_video_cache(
+            action_tokens=body_input,
+            action_freqs=action_pre["freqs"],
+            action_t_mod=action_pre["t_mod"],
+            action_context_payload={
+                "context": action_pre["context"],
+                "mask": action_pre["context_mask"],
+            },
+            video_kv_cache=video_kv_cache,
+            attention_mask=attention_mask,
+            video_seq_len=video_seq_len,
+        )
+        if expert_cache_state is not None:
+            expert_cache_state.update(body_input, body_output)
+        return body_output
+
     def _compute_video_loss_per_sample(
         self,
         pred_video: torch.Tensor,
@@ -596,6 +660,8 @@ class FastWAM(torch.nn.Module):
         context_mask: torch.Tensor,
         fuse_vae_embedding_in_latents: bool,
         gt_action: Optional[torch.Tensor] = None,
+        expert_cache_state: Optional[FixedStepCacheState] = None,
+        expert_cache_step: Optional[int] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         video_pre = self.video_expert.pre_dit(
             x=latents_video,
@@ -618,6 +684,30 @@ class FastWAM(torch.nn.Module):
             video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
             device=video_pre["tokens"].device,
         )
+
+        if expert_cache_state is not None:
+            video_seq_len = int(video_pre["tokens"].shape[1])
+            video_kv_cache, video_tokens = self.mot.prefill_video_cache_with_tokens(
+                video_tokens=video_pre["tokens"],
+                video_freqs=video_pre["freqs"],
+                video_t_mod=video_pre["t_mod"],
+                video_context_payload={
+                    "context": video_pre["context"],
+                    "mask": video_pre["context_mask"],
+                },
+                video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
+            )
+            action_tokens = self._run_action_body_with_video_cache(
+                action_pre=action_pre,
+                video_kv_cache=video_kv_cache,
+                attention_mask=attention_mask,
+                video_seq_len=video_seq_len,
+                expert_cache_state=expert_cache_state,
+                expert_cache_step=expert_cache_step,
+            )
+            pred_video = self.video_expert.post_dit(video_tokens, video_pre)
+            pred_action = self.action_expert.post_dit(action_tokens, action_pre)
+            return pred_video, pred_action
 
         tokens_out = self.mot(
             embeds_all={
@@ -719,6 +809,8 @@ class FastWAM(torch.nn.Module):
         video_kv_cache: list[dict[str, torch.Tensor]],
         attention_mask: torch.Tensor,
         video_seq_len: int,
+        expert_cache_state: Optional[FixedStepCacheState] = None,
+        expert_cache_step: Optional[int] = None,
     ) -> torch.Tensor:
         action_pre = self.action_expert.pre_dit(
             action_tokens=latents_action,
@@ -726,17 +818,13 @@ class FastWAM(torch.nn.Module):
             context=context,
             context_mask=context_mask,
         )
-        action_tokens = self.mot.forward_action_with_video_cache(
-            action_tokens=action_pre["tokens"],
-            action_freqs=action_pre["freqs"],
-            action_t_mod=action_pre["t_mod"],
-            action_context_payload={
-                "context": action_pre["context"],
-                "mask": action_pre["context_mask"],
-            },
+        action_tokens = self._run_action_body_with_video_cache(
+            action_pre=action_pre,
             video_kv_cache=video_kv_cache,
             attention_mask=attention_mask,
             video_seq_len=video_seq_len,
+            expert_cache_state=expert_cache_state,
+            expert_cache_step=expert_cache_step,
         )
         return self.action_expert.post_dit(action_tokens, action_pre)
 
@@ -758,6 +846,10 @@ class FastWAM(torch.nn.Module):
         seed: Optional[int] = None,
         rand_device: str = "cpu",
         tiled: bool = False,
+        expert_cache: bool = False,
+        expert_cache_reuse_steps: int = 1,
+        expert_cache_warmup_steps: int = 1,
+        expert_cache_cooldown_steps: int = 1,
         test_action_with_infer_action: bool = True,
     ) -> dict[str, Any]:
         self.eval()
@@ -776,6 +868,10 @@ class FastWAM(torch.nn.Module):
                 rand_device=rand_device,
                 tiled=tiled,
                 proprio=proprio.clone() if proprio is not None else None,
+                expert_cache=expert_cache,
+                expert_cache_reuse_steps=expert_cache_reuse_steps,
+                expert_cache_warmup_steps=expert_cache_warmup_steps,
+                expert_cache_cooldown_steps=expert_cache_cooldown_steps,
             )["action"]
         
         if input_image.ndim == 3:
@@ -881,11 +977,20 @@ class FastWAM(torch.nn.Module):
             dtype=latents_action.dtype,
             shift_override=sigma_shift,
         )
-        for step_t_video, step_delta_video, step_t_action, step_delta_action in zip(
-            infer_timesteps_video,
-            infer_deltas_video,
-            infer_timesteps_action,
-            infer_deltas_action,
+        action_expert_cache = self._make_action_expert_cache(
+            enabled=expert_cache,
+            num_inference_steps=num_inference_steps,
+            reuse_steps=expert_cache_reuse_steps,
+            warmup_steps=expert_cache_warmup_steps,
+            cooldown_steps=expert_cache_cooldown_steps,
+        )
+        for step_idx, (step_t_video, step_delta_video, step_t_action, step_delta_action) in enumerate(
+            zip(
+                infer_timesteps_video,
+                infer_deltas_video,
+                infer_timesteps_action,
+                infer_deltas_action,
+            )
         ):
             timestep_video = step_t_video.unsqueeze(0).to(dtype=latents_video.dtype, device=self.device)
             timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
@@ -899,6 +1004,8 @@ class FastWAM(torch.nn.Module):
                 context_mask=context_mask,
                 fuse_vae_embedding_in_latents=fuse_flag,
                 gt_action=action,
+                expert_cache_state=action_expert_cache,
+                expert_cache_step=step_idx,
             )
             pred_video = pred_video_posi
             pred_action = pred_action_posi
@@ -907,6 +1014,7 @@ class FastWAM(torch.nn.Module):
             latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
             latents_video[:, :, 0:1] = first_frame_latents.clone()
 
+        self._log_action_expert_cache(action_expert_cache)
         action_out = latents_action[0].detach().to(device="cpu", dtype=torch.float32)
         if test_action_with_infer_action:
             if not torch.allclose(action_out, action_only_out, atol=1e-2, rtol=1e-2):
@@ -936,6 +1044,10 @@ class FastWAM(torch.nn.Module):
         seed: Optional[int] = None,
         rand_device: str = "cpu",
         tiled: bool = False,
+        expert_cache: bool = False,
+        expert_cache_reuse_steps: int = 1,
+        expert_cache_warmup_steps: int = 1,
+        expert_cache_cooldown_steps: int = 1,
     ) -> dict[str, Any]:
         self.eval()
         if str(getattr(self.video_expert, "video_attention_mask_mode", "")) != "first_frame_causal":
@@ -1045,7 +1157,16 @@ class FastWAM(torch.nn.Module):
             dtype=latents_action.dtype,
             shift_override=sigma_shift,
         )
-        for step_t_action, step_delta_action in zip(infer_timesteps_action, infer_deltas_action):
+        action_expert_cache = self._make_action_expert_cache(
+            enabled=expert_cache,
+            num_inference_steps=num_inference_steps,
+            reuse_steps=expert_cache_reuse_steps,
+            warmup_steps=expert_cache_warmup_steps,
+            cooldown_steps=expert_cache_cooldown_steps,
+        )
+        for step_idx, (step_t_action, step_delta_action) in enumerate(
+            zip(infer_timesteps_action, infer_deltas_action)
+        ):
             timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
 
             pred_action_posi = self._predict_action_noise_with_cache(
@@ -1056,11 +1177,14 @@ class FastWAM(torch.nn.Module):
                 video_kv_cache=video_kv_cache,
                 attention_mask=attention_mask,
                 video_seq_len=video_seq_len,
+                expert_cache_state=action_expert_cache,
+                expert_cache_step=step_idx,
             )
             pred_action = pred_action_posi
 
             latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
 
+        self._log_action_expert_cache(action_expert_cache)
         return {
             "action": latents_action[0].detach().to(device="cpu", dtype=torch.float32),
         }
@@ -1084,6 +1208,10 @@ class FastWAM(torch.nn.Module):
         seed: Optional[int] = None,
         rand_device: str = "cpu",
         tiled: bool = False,
+        expert_cache: bool = False,
+        expert_cache_reuse_steps: int = 1,
+        expert_cache_warmup_steps: int = 1,
+        expert_cache_cooldown_steps: int = 1,
     ):
         return self.infer_joint(
             prompt=prompt,
@@ -1101,6 +1229,10 @@ class FastWAM(torch.nn.Module):
             seed=seed,
             rand_device=rand_device,
             tiled=tiled,
+            expert_cache=expert_cache,
+            expert_cache_reuse_steps=expert_cache_reuse_steps,
+            expert_cache_warmup_steps=expert_cache_warmup_steps,
+            expert_cache_cooldown_steps=expert_cache_cooldown_steps,
         )
 
     def save_checkpoint(self, path, optimizer=None, step=None):

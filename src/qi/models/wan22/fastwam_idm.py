@@ -243,6 +243,10 @@ class FastWAMIDM(FastWAMJoint):
         seed: Optional[int] = None,
         rand_device: str = "cpu",
         tiled: bool = False,
+        expert_cache: bool = False,
+        expert_cache_reuse_steps: int = 1,
+        expert_cache_warmup_steps: int = 1,
+        expert_cache_cooldown_steps: int = 1,
     ) -> dict[str, Any]:
         # Reuse infer_joint pipeline and keep infer_action output contract.
         out = self.infer_joint(
@@ -262,6 +266,10 @@ class FastWAMIDM(FastWAMJoint):
             rand_device=rand_device,
             tiled=tiled,
             test_action_with_infer_action=False,
+            expert_cache=expert_cache,
+            expert_cache_reuse_steps=expert_cache_reuse_steps,
+            expert_cache_warmup_steps=expert_cache_warmup_steps,
+            expert_cache_cooldown_steps=expert_cache_cooldown_steps,
         )
         return {"action": out["action"]}
 
@@ -283,6 +291,10 @@ class FastWAMIDM(FastWAMJoint):
         seed: Optional[int] = None,
         rand_device: str = "cpu",
         tiled: bool = False,
+        expert_cache: bool = False,
+        expert_cache_reuse_steps: int = 1,
+        expert_cache_warmup_steps: int = 1,
+        expert_cache_cooldown_steps: int = 1,
         test_action_with_infer_action: bool = True,
     ) -> dict[str, Any]:
         del negative_prompt, text_cfg_scale, test_action_with_infer_action
@@ -433,7 +445,16 @@ class FastWAMIDM(FastWAMJoint):
             dtype=latents_action.dtype,
             shift_override=sigma_shift,
         )
-        for step_t_action, step_delta_action in zip(infer_timesteps_action, infer_deltas_action):
+        action_expert_cache = self._make_action_expert_cache(
+            enabled=expert_cache,
+            num_inference_steps=num_inference_steps,
+            reuse_steps=expert_cache_reuse_steps,
+            warmup_steps=expert_cache_warmup_steps,
+            cooldown_steps=expert_cache_cooldown_steps,
+        )
+        for step_idx, (step_t_action, step_delta_action) in enumerate(
+            zip(infer_timesteps_action, infer_deltas_action)
+        ):
             timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
             pred_action = self._predict_action_noise_with_cache(
                 latents_action=latents_action,
@@ -443,9 +464,12 @@ class FastWAMIDM(FastWAMJoint):
                 video_kv_cache=video_kv_cache,
                 attention_mask=attention_mask,
                 video_seq_len=video_seq_len,
+                expert_cache_state=action_expert_cache,
+                expert_cache_step=step_idx,
             )
             latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
 
+        self._log_action_expert_cache(action_expert_cache)
         return {
             "video": self._decode_latents(latents_video, tiled=tiled),
             "action": latents_action[0].detach().to(device="cpu", dtype=torch.float32),

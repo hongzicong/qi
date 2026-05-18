@@ -279,6 +279,24 @@ class MoT(nn.Module):
                 - `k`: video key tensor [B, Sv, H*Dh]
                 - `v`: video value tensor [B, Sv, H*Dh]
         """
+        kv_cache, _ = self.prefill_video_cache_with_tokens(
+            video_tokens=video_tokens,
+            video_freqs=video_freqs,
+            video_t_mod=video_t_mod,
+            video_context_payload=video_context_payload,
+            video_attention_mask=video_attention_mask,
+        )
+        return kv_cache
+
+    def prefill_video_cache_with_tokens(
+        self,
+        video_tokens: torch.Tensor,
+        video_freqs: torch.Tensor,
+        video_t_mod: torch.Tensor,
+        video_context_payload: Optional[dict],
+        video_attention_mask: torch.Tensor,
+    ) -> tuple[list[dict[str, torch.Tensor]], torch.Tensor]:
+        """Prefill video branch and return both per-layer K/V and final tokens."""
         if "video" not in self.mixtures:
             raise ValueError("MoT requires `video` expert for `prefill_video_cache`.")
         if video_attention_mask.ndim != 2:
@@ -338,7 +356,7 @@ class MoT(nn.Module):
                 context_payload=video_context_payload,
             )
             kv_cache.append({"k": k, "v": v})
-        return kv_cache
+        return kv_cache, x
 
     def forward_action_with_video_cache(
         self,

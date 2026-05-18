@@ -66,6 +66,10 @@ class FastWAMJoint(FastWAM):
         seed: Optional[int] = None,
         rand_device: str = "cpu",
         tiled: bool = False,
+        expert_cache: bool = False,
+        expert_cache_reuse_steps: int = 1,
+        expert_cache_warmup_steps: int = 1,
+        expert_cache_cooldown_steps: int = 1,
         test_action_with_infer_action: bool = True,
     ) -> dict[str, Any]:
         if test_action_with_infer_action:
@@ -89,6 +93,10 @@ class FastWAMJoint(FastWAM):
             seed=seed,
             rand_device=rand_device,
             tiled=tiled,
+            expert_cache=expert_cache,
+            expert_cache_reuse_steps=expert_cache_reuse_steps,
+            expert_cache_warmup_steps=expert_cache_warmup_steps,
+            expert_cache_cooldown_steps=expert_cache_cooldown_steps,
             test_action_with_infer_action=False,
         )
 
@@ -109,6 +117,10 @@ class FastWAMJoint(FastWAM):
         seed: Optional[int] = None,
         rand_device: str = "cpu",
         tiled: bool = False,
+        expert_cache: bool = False,
+        expert_cache_reuse_steps: int = 1,
+        expert_cache_warmup_steps: int = 1,
+        expert_cache_cooldown_steps: int = 1,
     ) -> dict[str, Any]:
         self.eval()
 
@@ -207,11 +219,20 @@ class FastWAMJoint(FastWAM):
             dtype=latents_action.dtype,
             shift_override=sigma_shift,
         )
-        for step_t_video, step_delta_video, step_t_action, step_delta_action in zip(
-            infer_timesteps_video,
-            infer_deltas_video,
-            infer_timesteps_action,
-            infer_deltas_action,
+        action_expert_cache = self._make_action_expert_cache(
+            enabled=expert_cache,
+            num_inference_steps=num_inference_steps,
+            reuse_steps=expert_cache_reuse_steps,
+            warmup_steps=expert_cache_warmup_steps,
+            cooldown_steps=expert_cache_cooldown_steps,
+        )
+        for step_idx, (step_t_video, step_delta_video, step_t_action, step_delta_action) in enumerate(
+            zip(
+                infer_timesteps_video,
+                infer_deltas_video,
+                infer_timesteps_action,
+                infer_deltas_action,
+            )
         ):
             timestep_video = step_t_video.unsqueeze(0).to(dtype=latents_video.dtype, device=self.device)
             timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
@@ -225,12 +246,15 @@ class FastWAMJoint(FastWAM):
                 context_mask=context_mask,
                 fuse_vae_embedding_in_latents=fuse_flag,
                 gt_action=None,
+                expert_cache_state=action_expert_cache,
+                expert_cache_step=step_idx,
             )
 
             latents_video = self.infer_video_scheduler.step(pred_video_posi, step_delta_video, latents_video)
             latents_action = self.infer_action_scheduler.step(pred_action_posi, step_delta_action, latents_action)
             latents_video[:, :, 0:1] = first_frame_latents.clone()
 
+        self._log_action_expert_cache(action_expert_cache)
         return {
             "action": latents_action[0].detach().to(device="cpu", dtype=torch.float32),
         }
