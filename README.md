@@ -84,8 +84,7 @@ Unlike general-purpose inference runtimes, Qi is designed around the unique dema
   - [ ] Cuda graph
   - [ ] torch.compile
   - [ ] Kernel customization
-- [ ] DiT caching
-- [ ] Streaming action generation
+- [x] DiT caching
 - [ ] World-action model zoo
 
 ---
