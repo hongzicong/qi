@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import time
+import os
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,7 @@ from qi.utils.logging_config import get_logger, setup_logging
 from qi.utils.video_io import save_mp4
 from qi.utils.video_metrics import pil_frames_to_video_tensor, video_psnr, video_ssim
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 register_default_resolvers()
 logger = get_logger(__name__)
