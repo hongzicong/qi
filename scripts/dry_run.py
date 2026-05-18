@@ -57,6 +57,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-horizon", type=int, default=None)
     parser.add_argument("--num-inference-steps", type=int, default=10)
     parser.add_argument(
+        "--expert-cache",
+        action="store_true",
+        help="Enable fixed-step action expert DiT body residual caching during inference.",
+    )
+    parser.add_argument(
+        "--expert-cache-reuse-steps",
+        type=int,
+        default=1,
+        help="Number of adjacent denoising steps that reuse the previous computed action expert body residual.",
+    )
+    parser.add_argument(
+        "--expert-cache-warmup-steps",
+        type=int,
+        default=1,
+        help="Number of initial action denoising steps that always compute the DiT body.",
+    )
+    parser.add_argument(
+        "--expert-cache-cooldown-steps",
+        type=int,
+        default=1,
+        help="Number of final action denoising steps that always compute the DiT body.",
+    )
+    parser.add_argument(
         "--num-chunks",
         type=int,
         default=1,
@@ -501,6 +524,10 @@ def run_dataset_source(args: argparse.Namespace, cfg: DictConfig, model: Any, ou
         "sample_index": sample_index,
         "condition_on_gt_action": bool(args.condition_on_gt_action),
         "num_inference_steps": int(args.num_inference_steps),
+        "expert_cache": bool(args.expert_cache),
+        "expert_cache_reuse_steps": int(args.expert_cache_reuse_steps),
+        "expert_cache_warmup_steps": int(args.expert_cache_warmup_steps),
+        "expert_cache_cooldown_steps": int(args.expert_cache_cooldown_steps),
         "seed": int(args.seed),
         "prompt": sample["prompt"],
     }
@@ -538,6 +565,10 @@ def run_dataset_source(args: argparse.Namespace, cfg: DictConfig, model: Any, ou
         seed=args.seed,
         rand_device=args.rand_device,
         tiled=args.tiled,
+        expert_cache=args.expert_cache,
+        expert_cache_reuse_steps=args.expert_cache_reuse_steps,
+        expert_cache_warmup_steps=args.expert_cache_warmup_steps,
+        expert_cache_cooldown_steps=args.expert_cache_cooldown_steps,
     )
     
     if args.time_inference:
@@ -670,6 +701,10 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
             seed=chunk_seed,
             rand_device=args.rand_device,
             tiled=args.tiled,
+            expert_cache=args.expert_cache,
+            expert_cache_reuse_steps=args.expert_cache_reuse_steps,
+            expert_cache_warmup_steps=args.expert_cache_warmup_steps,
+            expert_cache_cooldown_steps=args.expert_cache_cooldown_steps,
         )
 
         if args.time_inference:
@@ -717,6 +752,10 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
         "num_chunks": num_chunks,
         "rollout_conditioning": "previous chunk last predicted frame",
         "num_inference_steps": int(args.num_inference_steps),
+        "expert_cache": bool(args.expert_cache),
+        "expert_cache_reuse_steps": int(args.expert_cache_reuse_steps),
+        "expert_cache_warmup_steps": int(args.expert_cache_warmup_steps),
+        "expert_cache_cooldown_steps": int(args.expert_cache_cooldown_steps),
         "seed": int(args.seed),
         "prompt": formatted_prompt,
         "state_json": args.state_json,
