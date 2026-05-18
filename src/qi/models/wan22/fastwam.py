@@ -1,3 +1,4 @@
+import time
 from typing import Any, Optional, Sequence, Union
 
 import torch
@@ -851,11 +852,15 @@ class FastWAM(torch.nn.Module):
         expert_cache_warmup_steps: int = 1,
         expert_cache_cooldown_steps: int = 1,
         test_action_with_infer_action: bool = True,
+        time_inference: bool = False,
     ) -> dict[str, Any]:
         self.eval()
         if test_action_with_infer_action:
             if seed is None:
                 raise ValueError("`test_action_with_infer_action=True` requires non-null `seed`.")
+            if time_inference:
+                torch.cuda.synchronize()
+                _t_action = time.perf_counter()
             action_only_out = self.infer_action(
                 prompt=prompt,
                 input_image=input_image.clone(),
@@ -873,6 +878,9 @@ class FastWAM(torch.nn.Module):
                 expert_cache_warmup_steps=expert_cache_warmup_steps,
                 expert_cache_cooldown_steps=expert_cache_cooldown_steps,
             )["action"]
+            if time_inference:
+                torch.cuda.synchronize()
+                logger.info("infer_action time: %.2f s", time.perf_counter() - _t_action)
         
         if input_image.ndim == 3:
             input_image = input_image.unsqueeze(0)
@@ -1212,6 +1220,7 @@ class FastWAM(torch.nn.Module):
         expert_cache_reuse_steps: int = 1,
         expert_cache_warmup_steps: int = 1,
         expert_cache_cooldown_steps: int = 1,
+        time_inference: bool = False,
     ):
         return self.infer_joint(
             prompt=prompt,
@@ -1233,6 +1242,7 @@ class FastWAM(torch.nn.Module):
             expert_cache_reuse_steps=expert_cache_reuse_steps,
             expert_cache_warmup_steps=expert_cache_warmup_steps,
             expert_cache_cooldown_steps=expert_cache_cooldown_steps,
+            time_inference=time_inference,
         )
 
     def save_checkpoint(self, path, optimizer=None, step=None):

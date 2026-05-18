@@ -571,6 +571,7 @@ def run_dataset_source(args: argparse.Namespace, cfg: DictConfig, model: Any, ou
         expert_cache_reuse_steps=args.expert_cache_reuse_steps,
         expert_cache_warmup_steps=args.expert_cache_warmup_steps,
         expert_cache_cooldown_steps=args.expert_cache_cooldown_steps,
+        time_inference=args.time_inference,
     )
     
     if args.time_inference:
@@ -707,6 +708,7 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
             expert_cache_reuse_steps=args.expert_cache_reuse_steps,
             expert_cache_warmup_steps=args.expert_cache_warmup_steps,
             expert_cache_cooldown_steps=args.expert_cache_cooldown_steps,
+            time_inference=args.time_inference,
         )
 
         if args.time_inference:
