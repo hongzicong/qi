@@ -1,31 +1,14 @@
 <div align="center">
 
-# 器 Qi
+# Qi
 
 **A High-Performance Real-Time Inference Engine for World Action Models**
-
-*"形而上者谓之道，形而下者谓之器"*
-*— 《周易·系辞上》*
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 [![Version](https://img.shields.io/badge/version-0.1.0-orange.svg)]()
 
 </div>
-
----
-
-## Philosophy
-
-The name **Qi** (器, *qì*) comes from a foundational line in the *I Ching* (*Zhou Yi*, Commentary on the Appended Phrases):
-
-> 形而上者谓之道，形而下者谓之器
->
-> *"That which is above form is called Dao; that which takes form is called Qi."*
-
-In classical Chinese thought, **Dao** (道) is the formless principle — the underlying law of the world. **Qi** (器) is the vessel, the concrete instrument through which Dao manifests and acts.
-
-We adopt this framing for a simple reason: **器以载道** — *the vessel carries the Dao*. A world action model encodes a deep understanding of how the world works and how actions ripple through it. **Qi** is the engine that gives this model a body — fast, precise, and real-time — so that understanding can become action.
 
 ---
 
@@ -79,13 +62,29 @@ Unlike general-purpose inference runtimes, Qi is designed around the unique dema
 
 - [x] Edge deployment
   - [x] NVIDIA RTX 4090
-  - [ ] NVIDIA Jetson Orin
+  - [x] NVIDIA Jetson Orin
+  - [x] NVIDIA A100
+- [x] DiT caching
+- [ ] Quantization
 - [ ] Kernel optimization
   - [ ] Cuda graph
   - [ ] torch.compile
   - [ ] Kernel customization
-- [x] DiT caching
 - [ ] World-action model zoo
+
+---
+
+## Philosophy
+
+The name **Qi** (器, *qì*) comes from a foundational line in the *I Ching* (*Zhou Yi*, Commentary on the Appended Phrases):
+
+> 形而上者谓之道，形而下者谓之器
+>
+> *"That which is above form is called Dao; that which takes form is called Qi."*
+
+In classical Chinese thought, **Dao** (道) is the formless principle — the underlying law of the world. **Qi** (器) is the vessel, the concrete instrument through which Dao manifests and acts.
+
+We adopt this framing for a simple reason: **器以载道** — *the vessel carries the Dao*. A world action model encodes a deep understanding of how the world works and how actions ripple through it. **Qi** is the engine that gives this model a body — fast, precise, and real-time — so that understanding can become action.
 
 ---
 
