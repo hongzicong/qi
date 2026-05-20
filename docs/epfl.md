@@ -3,12 +3,7 @@
 ## Build and Push Docker Image
 
 ```bash
-# Build base (only when dependencies change)
-docker build --platform linux/amd64 -f ./docker/Dockerfile.base \
-    --tag registry.rcp.epfl.ch/dcl-zihong/qi-base:latest .
-
-# Build app (every time code changes)
-docker build --platform linux/amd64 -f ./docker/Dockerfile.epfl.app \
+docker build --platform linux/amd64 -f ./docker/Dockerfile.epfl \
     --tag registry.rcp.epfl.ch/dcl-zihong/qi:latest \
     --build-arg LDAP_GROUPNAME=DCL-StaffU \
     --build-arg LDAP_GID=11260 \

@@ -1,4 +1,4 @@
-FROM qi-base:latest
+FROM nvcr.io/nvidia/pytorch:26.04-py3
 
 # Copy code
 COPY . /root/qi/

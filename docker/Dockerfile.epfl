@@ -1,4 +1,4 @@
-FROM registry.rcp.epfl.ch/dcl-zihong/qi-base:latest
+FROM nvcr.io/nvidia/pytorch:26.04-py3
 
 # EPFL UID/GID mapping
 ARG LDAP_USERNAME
