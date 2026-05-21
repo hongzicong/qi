@@ -40,8 +40,7 @@ nsys profile \
     --capture-range-end=stop \
     --gpu-metrics-devices=all \
     -o output/cudagraph_cache_torchcompile \
-python scripts/dry_run.py \
-  --source files \
+python  tests/test_dry_run.py\
   --ckpt $DIFFSYNTH_MODEL_BASE_PATH/step_008140.pt \
   --dataset-stats $DIFFSYNTH_MODEL_BASE_PATH/dataset_stats.json \
   --cam-high ./tests/data/cam_high.png \
@@ -49,12 +48,10 @@ python scripts/dry_run.py \
   --cam-right-wrist ./tests/data/cam_right_wrist.png \
   --state-json ./tests/data/state.json \
   --prompt "Pick and place the numbered blocks 9, 1, 5, 11, and 4 to the lower area in order." \
-  --use-text-encoder \
   --output-dir $OUTPUT_PATH/dry_run_result \
   --num-inference-steps 10 \
   --num-chunks 10 \
-  --time-inference \
-   --seed 42 \
+  --seed 42 \ 
   --expert-cache \
   --torch-compile
 ```
