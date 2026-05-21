@@ -289,7 +289,9 @@ class ActionDiT(nn.Module):
         tokens = self.action_encoder(action_tokens)
         context_emb = self.text_embedding(context)
         context_attn_mask = context_mask.unsqueeze(1).expand(-1, seq_len, -1)
-        freqs = self.freqs[:seq_len].view(seq_len, 1, -1).to(tokens.device)
+        if self.freqs.device != tokens.device:
+            self.freqs = self.freqs.to(tokens.device)
+        freqs = self.freqs[:seq_len].view(seq_len, 1, -1)
 
         return {
             "tokens": tokens,
