@@ -263,7 +263,7 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
         )
 
         torch.cuda.synchronize()
-        logger.info("Inference time (chunk %d): %.2f s", chunk_idx, time.perf_counter() - t0)
+        logger.info("Inference time (chunk %d): %.3f s", chunk_idx, time.perf_counter() - t0)
 
         pred_frames = pred["video"]
         save_mp4(pred_frames, str(output_dir / f"{chunk_prefix}_pred.mp4"), fps=args.fps)

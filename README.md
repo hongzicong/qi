@@ -48,16 +48,21 @@ Unlike general-purpose inference runtimes, Qi is designed around the unique dema
 
 ## Performance
 
-### A100
+### Per-action chunk latency on A100
 
-| Metric | Baseline (ms) | + DiT Cache (ms) | Reduction |
-|--------|--------------|-----------------|-----------|
-| Mean   | 480        | 317           | −34.0%    |
-| P50    | 480        | 320           | −33.3%    |
-| P90    | 520        | 350           | −32.7%    |
-| P99    | 520        | 350           | −32.7%    |
-| Max    | 520        | 350           | −32.7%    |
-| Min    | 460        | 300           | −34.8%    |
+| Metric (ms) | Baseline | +DiT Cache | +CUDA Graph | +`torch.compile` |
+|-------------|----------|------------|-------------|------------------|
+| Mean        | 463      | 304        | 125         | 95               |
+| P50         | 464      | 303        | 124         | 94               |
+| P99         | 469      | 323        | 130         | 100              |
+| Max         | 469      | 323        | 130         | 100              |
+
+| Speedup             | +DiT Cache | +CUDA Graph | +`torch.compile` |
+|---------------------|------------|-------------|------------------|
+| Mean                | 1.52×      | 3.70×       | 4.87×            |
+| P99                 | 1.45×      | 3.61×       | 4.69×            |
+
+Each + column is cumulative (e.g. +CUDA Graph includes DiT Cache).
 
 ---
 
@@ -70,8 +75,8 @@ Unlike general-purpose inference runtimes, Qi is designed around the unique dema
 - [x] DiT caching
 - [ ] Quantization
 - [ ] Kernel optimization
-  - [ ] Cuda graph
-  - [ ] torch.compile
+  - [x] Cuda graph
+  - [x] torch.compile
   - [ ] Kernel customization
 - [ ] World-action model zoo
 

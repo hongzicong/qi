@@ -1052,7 +1052,7 @@ class FastWAM(torch.nn.Module):
             )["action"]
             if time_inference:
                 torch.cuda.synchronize()
-                logger.info("infer_action time: %.2f s", time.perf_counter() - _t_action)
+                logger.info("infer_action time: %.3f s", time.perf_counter() - _t_action)
         
         if input_image.ndim == 3:
             input_image = input_image.unsqueeze(0)
