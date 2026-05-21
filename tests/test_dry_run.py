@@ -87,7 +87,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rand-device", default="cpu")
     parser.add_argument("--fps", type=int, default=8)
     parser.add_argument("--tiled", action="store_true")
-    
+    parser.add_argument("--no-cuda-graph", action="store_true", help="Disable CUDA Graph for action denoising (for baseline comparison).")
+    parser.add_argument("--torch-compile", action="store_true", help="Enable torch.compile on action expert inference (Inductor backend, default mode).")
+
     parser.add_argument("--cam-high", default=None)
     parser.add_argument("--cam-left-wrist", default=None)
     parser.add_argument("--cam-right-wrist", default=None)
@@ -253,6 +255,7 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
             rand_device=args.rand_device,
             tiled=args.tiled,
             expert_cache=args.expert_cache,
+            cuda_graph=not args.no_cuda_graph,
             expert_cache_reuse_steps=args.expert_cache_reuse_steps,
             expert_cache_warmup_steps=args.expert_cache_warmup_steps,
             expert_cache_cooldown_steps=args.expert_cache_cooldown_steps,
@@ -323,6 +326,18 @@ def run() -> None:
     setup_logging(log_level=logging.INFO)
     cfg = load_config(args)
     model = load_model(args, cfg)
+
+    if args.torch_compile:
+        import logging as _logging
+        _logging.getLogger("torch._dynamo").setLevel(_logging.WARNING)
+        logger.info("torch.compile enabled on MoT body forward (Inductor, default mode)")
+
+    if not args.no_cuda_graph or args.torch_compile:
+        model._setup_graph_mgr(torch_compile=args.torch_compile)
+        if not args.no_cuda_graph:
+            logger.info("CUDA Graph enabled (wraps MoT body only)")
+        else:
+            logger.info("CUDA Graph disabled, torch.compile only")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

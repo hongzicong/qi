@@ -17,6 +17,173 @@ from .schedulers.scheduler_continuous import WanContinuousFlowMatchScheduler
 logger = get_logger(__name__)
 
 
+class CUDAGraphManager:
+    def __init__(self, body_fn):
+        """
+        Args:
+            body_fn: ``mot.forward_action_with_video_cache`` — callable with
+                keyword args (action_tokens, action_freqs, action_t_mod,
+                action_context_payload, video_kv_cache, attention_mask,
+                video_seq_len) -> body_output [B, Sa, hidden_dim].
+        """
+        self._body_fn = body_fn
+        self._graph: Optional[torch.cuda.CUDAGraph] = None
+        self._static_inputs: Optional[dict] = None
+        self._static_output: Optional[torch.Tensor] = None
+        self._captured: bool = False
+        # Persistent tensors pinned by reference (constant across denoising steps)
+        self._persistent: Optional[dict] = None
+
+    def update_persistent(
+        self,
+        *,
+        context: torch.Tensor,
+        context_mask: torch.Tensor,
+        video_kv_cache: list[dict[str, torch.Tensor]],
+        attention_mask: torch.Tensor,
+        video_seq_len: int,
+    ) -> bool:
+        """Store or update persistent tensors.
+
+        Returns ``True`` when shapes changed (caller must recapture the graph).
+        """
+        new_persistent = {
+            "context": context,
+            "context_mask": context_mask,
+            "video_kv_cache": video_kv_cache,
+            "attention_mask": attention_mask,
+            "video_seq_len": video_seq_len,
+        }
+
+        if self._persistent is not None and self._shapes_match(new_persistent):
+            # Same shapes — copy data into existing tensors
+            self._persistent["context"].copy_(context)
+            self._persistent["context_mask"].copy_(context_mask)
+            for layer_idx in range(len(video_kv_cache)):
+                self._persistent["video_kv_cache"][layer_idx]["k"].copy_(
+                    video_kv_cache[layer_idx]["k"]
+                )
+                self._persistent["video_kv_cache"][layer_idx]["v"].copy_(
+                    video_kv_cache[layer_idx]["v"]
+                )
+            return False
+
+        # Shape changed or first call — reset and store new tensors
+        self.reset()
+        self._persistent = new_persistent
+        return True
+
+    def _shapes_match(self, new: dict) -> bool:
+        if self._persistent is None:
+            return False
+        if self._persistent["context"].shape != new["context"].shape:
+            return False
+        if self._persistent["context_mask"].shape != new["context_mask"].shape:
+            return False
+        if len(self._persistent["video_kv_cache"]) != len(new["video_kv_cache"]):
+            return False
+        for old_layer, new_layer in zip(
+            self._persistent["video_kv_cache"], new["video_kv_cache"]
+        ):
+            if old_layer["k"].shape != new_layer["k"].shape:
+                return False
+            if old_layer["v"].shape != new_layer["v"].shape:
+                return False
+        return True
+
+    @torch.inference_mode()
+    def capture(
+        self,
+        *,
+        action_pre: dict[str, Any],
+        attention_mask: torch.Tensor,
+        video_seq_len: int,
+    ) -> None:
+        assert self._persistent is not None, "update_persistent() must be called first"
+
+        # Static inputs — cloned so we can copy_() new values during replay
+        self._static_inputs = {
+            "tokens": action_pre["tokens"].clone(),
+            "freqs": action_pre["freqs"].clone() if isinstance(action_pre["freqs"], torch.Tensor) else action_pre["freqs"],
+            "t_mod": action_pre["t_mod"].clone(),
+            "context": action_pre["context"].clone(),
+            "context_mask": action_pre["context_mask"].clone(),
+        }
+
+        p = self._persistent
+        static = self._static_inputs
+
+        # Warmup on a separate stream for cuBLAS autotune
+        warmup_stream = torch.cuda.Stream()
+        warmup_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup_stream):
+            for _ in range(2):
+                _ = self._body_fn(
+                    action_tokens=static["tokens"],
+                    action_freqs=static["freqs"],
+                    action_t_mod=static["t_mod"],
+                    action_context_payload={
+                        "context": static["context"],
+                        "mask": static["context_mask"],
+                    },
+                    video_kv_cache=p["video_kv_cache"],
+                    attention_mask=p["attention_mask"],
+                    video_seq_len=p["video_seq_len"],
+                )
+        torch.cuda.current_stream().wait_stream(warmup_stream)
+
+        # Capture
+        self._graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self._graph):
+            self._static_output = self._body_fn(
+                action_tokens=static["tokens"],
+                action_freqs=static["freqs"],
+                action_t_mod=static["t_mod"],
+                action_context_payload={
+                    "context": static["context"],
+                    "mask": static["context_mask"],
+                },
+                video_kv_cache=p["video_kv_cache"],
+                attention_mask=p["attention_mask"],
+                video_seq_len=p["video_seq_len"],
+            )
+
+        self._captured = True
+
+
+    def replay(
+        self,
+        *,
+        action_pre: dict[str, Any],
+    ) -> torch.Tensor:
+        """Copy new inputs to static buffers, replay graph, return body_output."""
+        static = self._static_inputs
+        static["tokens"].copy_(action_pre["tokens"])
+        if isinstance(static["freqs"], torch.Tensor) and isinstance(action_pre["freqs"], torch.Tensor):
+            static["freqs"].copy_(action_pre["freqs"])
+        else:
+            static["freqs"] = action_pre["freqs"]
+        static["t_mod"].copy_(action_pre["t_mod"])
+        static["context"].copy_(action_pre["context"])
+        static["context_mask"].copy_(action_pre["context_mask"])
+
+        self._graph.replay()
+        return self._static_output
+
+    def reset(self):
+        if self._graph is not None:
+            self._graph.reset()
+        self._graph = None
+        self._static_inputs = None
+        self._static_output = None
+        self._captured = False
+        self._persistent = None
+
+    @property
+    def captured(self) -> bool:
+        return self._captured
+
+
 class FastWAM(torch.nn.Module):
     """MoT world model with video/action experts."""
 
@@ -86,6 +253,9 @@ class FastWAM(torch.nn.Module):
         self.torch_dtype = torch_dtype
         self.loss_lambda_video = float(loss_lambda_video)
         self.loss_lambda_action = float(loss_lambda_action)
+        
+        # CUDA Graph manager (wraps MoT body only)
+        self._graph_mgr: Optional[CUDAGraphManager] = None
 
         self.to(self.device)
 
@@ -853,6 +1023,7 @@ class FastWAM(torch.nn.Module):
         expert_cache_cooldown_steps: int = 1,
         test_action_with_infer_action: bool = True,
         time_inference: bool = False,
+        cuda_graph: bool = True,
     ) -> dict[str, Any]:
         self.eval()
         if test_action_with_infer_action:
@@ -877,6 +1048,7 @@ class FastWAM(torch.nn.Module):
                 expert_cache_reuse_steps=expert_cache_reuse_steps,
                 expert_cache_warmup_steps=expert_cache_warmup_steps,
                 expert_cache_cooldown_steps=expert_cache_cooldown_steps,
+                cuda_graph=cuda_graph,
             )["action"]
             if time_inference:
                 torch.cuda.synchronize()
@@ -1036,6 +1208,18 @@ class FastWAM(torch.nn.Module):
             "action": action_out,
         }
 
+    def _setup_graph_mgr(self, torch_compile: bool = False) -> None:
+        """Create (or recreate) the CUDA Graph manager.
+
+        Must be called after the model is on GPU.  If *torch_compile* is True
+        the body function is wrapped with ``torch.compile`` before being handed
+        to the manager.
+        """
+        body_fn = self.mot.forward_action_with_video_cache
+        if torch_compile:
+            body_fn = torch.compile(body_fn)
+        self._graph_mgr = CUDAGraphManager(body_fn)
+
     @torch.inference_mode()
     def infer_action(
         self,
@@ -1056,6 +1240,7 @@ class FastWAM(torch.nn.Module):
         expert_cache_reuse_steps: int = 1,
         expert_cache_warmup_steps: int = 1,
         expert_cache_cooldown_steps: int = 1,
+        cuda_graph: bool = True,
     ) -> dict[str, Any]:
         self.eval()
         if str(getattr(self.video_expert, "video_attention_mask_mode", "")) != "first_frame_causal":
@@ -1128,6 +1313,8 @@ class FastWAM(torch.nn.Module):
                 proprio=proprio,
             )
 
+        # --- Update persistent tensors via graph manager ---
+        # (context/mask + video_kv are pinned by reference for CUDA Graph)
         timestep_video = torch.zeros(
             (first_frame_latents.shape[0],),
             dtype=first_frame_latents.dtype,
@@ -1159,6 +1346,16 @@ class FastWAM(torch.nn.Module):
             video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
         )
 
+        # Sync persistent tensors into graph manager (copy_ or reset)
+        if self._graph_mgr is not None:
+            self._graph_mgr.update_persistent(
+                context=context,
+                context_mask=context_mask,
+                video_kv_cache=video_kv_cache,
+                attention_mask=attention_mask,
+                video_seq_len=video_seq_len,
+            )
+
         infer_timesteps_action, infer_deltas_action = self.infer_action_scheduler.build_inference_schedule(
             num_inference_steps=num_inference_steps,
             device=self.device,
@@ -1172,25 +1369,70 @@ class FastWAM(torch.nn.Module):
             warmup_steps=expert_cache_warmup_steps,
             cooldown_steps=expert_cache_cooldown_steps,
         )
+        use_cuda_graph = cuda_graph and self._graph_mgr is not None
+        graph_warmup_steps = 0
+
         for step_idx, (step_t_action, step_delta_action) in enumerate(
             zip(infer_timesteps_action, infer_deltas_action)
         ):
-            timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
+            timestep_action = step_t_action.unsqueeze(0).to(
+                dtype=latents_action.dtype, device=self.device
+            )
 
-            pred_action_posi = self._predict_action_noise_with_cache(
-                latents_action=latents_action,
-                timestep_action=timestep_action,
+            # Stage 1: pre_dit — always eager (lightweight, provides body_input for cache)
+            action_pre = self.action_expert.pre_dit(
+                action_tokens=latents_action,
+                timestep=timestep_action,
                 context=context,
                 context_mask=context_mask,
-                video_kv_cache=video_kv_cache,
-                attention_mask=attention_mask,
-                video_seq_len=video_seq_len,
-                expert_cache_state=action_expert_cache,
-                expert_cache_step=step_idx,
             )
-            pred_action = pred_action_posi
+            body_input = action_pre["tokens"]
 
-            latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
+            # Expert cache decision
+            cache_decision = None
+            if action_expert_cache is not None:
+                cache_decision = action_expert_cache.begin_step(step_idx)
+
+            # Stage 2: body — three sources, all output 1024-dim body_output
+            if cache_decision is not None and cache_decision.should_reuse:
+                # Cache reuse: skip body, just add residual
+                body_output = action_expert_cache.reuse(body_input)
+            elif use_cuda_graph and self._graph_mgr.captured and step_idx >= graph_warmup_steps:
+                # CUDA Graph replay (body only)
+                body_output = self._graph_mgr.replay(action_pre=action_pre)
+            else:
+                # Normal / warmup path
+                body_output = self.mot.forward_action_with_video_cache(
+                    action_tokens=body_input,
+                    action_freqs=action_pre["freqs"],
+                    action_t_mod=action_pre["t_mod"],
+                    action_context_payload={
+                        "context": action_pre["context"],
+                        "mask": action_pre["context_mask"],
+                    },
+                    video_kv_cache=video_kv_cache,
+                    attention_mask=attention_mask,
+                    video_seq_len=video_seq_len,
+                )
+                # Capture graph after warmup
+                if use_cuda_graph and step_idx == graph_warmup_steps and not self._graph_mgr.captured:
+                    self._graph_mgr.capture(
+                        action_pre=action_pre,
+                        attention_mask=attention_mask,
+                        video_seq_len=video_seq_len,
+                    )
+
+            # Stage 3: post_dit — always eager (single linear, μs-level)
+            pred_action = self.action_expert.post_dit(body_output, action_pre)
+
+            # Stage 4: cache update — now has correct 1024-dim body_output every step
+            if action_expert_cache is not None and not (cache_decision is not None and cache_decision.should_reuse):
+                action_expert_cache.update(body_input, body_output)
+
+            # Stage 5: scheduler step
+            latents_action = self.infer_action_scheduler.step(
+                pred_action, step_delta_action, latents_action
+            )
 
         self._log_action_expert_cache(action_expert_cache)
         return {
@@ -1221,6 +1463,7 @@ class FastWAM(torch.nn.Module):
         expert_cache_warmup_steps: int = 1,
         expert_cache_cooldown_steps: int = 1,
         time_inference: bool = False,
+        cuda_graph: bool = True,
     ):
         return self.infer_joint(
             prompt=prompt,
@@ -1243,6 +1486,7 @@ class FastWAM(torch.nn.Module):
             expert_cache_warmup_steps=expert_cache_warmup_steps,
             expert_cache_cooldown_steps=expert_cache_cooldown_steps,
             time_inference=time_inference,
+            cuda_graph=cuda_graph,
         )
 
     def save_checkpoint(self, path, optimizer=None, step=None):
