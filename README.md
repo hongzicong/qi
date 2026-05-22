@@ -76,6 +76,20 @@ Unlike general-purpose inference runtimes, Qi is designed around the unique dema
 | Mean                | 1.50×      | 2.19×       | 2.71×            |
 | P99                 | 1.50×      | 2.20×       | 2.64×            |
 
+### Per-action chunk latency on jetson
+
+| Metric (ms) | Baseline | +DiT Cache | +CUDA Graph | +`torch.compile` |
+|-------------|----------|------------|-------------|------------------|
+| Mean        | 1491     | 978        | 477         | 400              |
+| P50         | 1480     | 980        | 460         | 400              |
+| P99         | 1550     | 1010       | 580         | 420              |
+| Max         | 1550     | 1010       | 580         | 420              |
+
+| Speedup             | +DiT Cache | +CUDA Graph | +`torch.compile` |
+|---------------------|------------|-------------|------------------|
+| Mean                | 1.52×      | 3.13×       | 2.73×            |
+| P99                 | 1.53×      | 2.67×       | 3.69×            |
+
 Each + column is cumulative (e.g. +CUDA Graph includes DiT Cache).
 
 ---
