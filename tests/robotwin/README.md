@@ -72,6 +72,27 @@ Return to the qi repo root before running the examples below:
 cd ../../..
 ```
 
+## Optional cuRobo Planner
+
+Some RoboTwin embodiments or planner configurations may require cuRobo. If you
+hit an error such as `ModuleNotFoundError: No module named 'curobo.types.math'`,
+install cuRobo under the vendored RoboTwin envs directory:
+
+```bash
+cd tests/third_party/RoboTwin/envs
+git clone https://github.com/NVlabs/curobo.git
+cd curobo
+git fetch --tags
+git checkout v0.7.8
+pip install -e . --no-build-isolation
+```
+
+Return to the qi repo root after installation:
+
+```bash
+cd ../../../..
+```
+
 ## Evaluation
 
 Single-task example:
