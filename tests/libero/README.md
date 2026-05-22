@@ -50,6 +50,12 @@ Before running the LIBERO benchmark, install the official LIBERO simulation stac
 from the [LIBERO repository](https://github.com/Lifelong-Robot-Learning/LIBERO),
 or use an environment that already contains the same runtime dependencies.
 
+If the LIBERO source tree is not already present, clone it under `tests/third_party`:
+
+```bash
+git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git tests/third_party/LIBERO
+```
+
 The expected LIBERO-side packages include:
 
 ```bash
