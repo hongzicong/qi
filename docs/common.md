@@ -108,8 +108,8 @@ python  tests/test_dry_run.py\
   --prompt "Pick and place the numbered blocks 9, 1, 5, 11, and 4 to the lower area in order." \
   --output-dir $OUTPUT_PATH/dry_run_result \
   --num-inference-steps 10 \
-  --num-chunks 10 \
-  --seed 42 \ 
+  --num-chunks 20 \
+  --seed 42 \
   --expert-cache \
   --torch-compile
 ```
