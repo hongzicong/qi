@@ -1,0 +1,40 @@
+# Can configuration
+left_channel: "can_left"        # your can channel name for left arm
+right_channel: "can_right"      # your can channel name for right arm
+bitrate: 1000000                # your can bitrate, usually 1000000 for cobot magic
+
+# Robot parameters
+speed_pct: 15                   # velocity percentage
+max_linear_vel: 0.5             # maximum linear velocity in m/s
+max_angular_vel: 0.1            # maximum angular velocity in rad/s
+max_linear_acc: 0.1             # maximum linear acceleration in m/s^2
+max_angular_acc: 0.05           # maximum angular acceleration in rad/s^2
+LEFT_INIT_POSITION: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.05] # initial position for left arm
+RIGHT_INIT_POSITION: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.05] # initial position for right arm
+
+# Safety thresholds
+ACTION_SAFETY_THRESHOLD: 1.5     # maximum difference between last action and action pending execution
+STATE_SAFETY_THRESHOLD: 0.3       # maximum difference between current state and action pending execution
+
+# Inference properties
+ckpt: "your_ckpt_path"  # Path to .../checkpoints/weights/step_xxxxxx.pt
+dataset_stats: "your_dataset_stats_path"  # Path to .../dataset_stats.json
+prompt: "your prompt"  # Task prompt for text conditioning
+context_cache_dir:  "your_text_embedding_cache_dir"  # Optional text embedding cache directory
+use_text_encoder: false  # Whether to use text encoder instead of cached embeds
+action_horizon: 32  # Number of actions to infer per step
+num_inference_steps: 10  # Number of steps for diffusion inference
+execute_steps: 1  # Number of action steps to execute per inference cycle
+seed: 42  # Random seed for execution reproducibility
+rospy_rate: 50             # rate for rospy
+exp_weight_factor: 0.5     # exponential weight factory
+dry_run: false  # Whether to run without executing on real robot hardware
+
+# Actions and save config
+episode_idx_dict:               # a dictionary to record the current episode index
+  success: 0
+  fail: 0
+output_actions: "./outputs/predicted_actions.npy"  # File path to save predicted actions as .npy
+output_actions_json: "./outputs/predicted_actions.json"  # Optional file path to save as JSON
+
+

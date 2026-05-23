@@ -5,17 +5,6 @@ This script is intentionally dry-run first: it can run from image files and a
 state JSON file, save predicted actions, and exposes small provider/controller
 classes that can be replaced by real robot IO.
 
-Example command:
-uv run python tests/deploy_real_ckpt_temporal_ensembling.py \
-    --ckpt "your_ckpt_path" \
-    --dataset-stats "your_<dataset_stats.json>_path" \
-    --prompt "your_task_prompt" \
-    --num-replans 5000 \
-    --execute-steps 1 \
-    --output-actions predicted_actions.npy \
-    --output-actions-json predicted_actions.json \
-    --context-cache-dir your_text_embedding_cache_dir \
-    --no-dry-run
 """
 
 from __future__ import annotations
@@ -48,6 +37,11 @@ import time
 import signal
 from collections import deque, defaultdict
 import threading
+import sys
+import select
+import termios
+import tty
+
 from pyAgxArm import create_agx_arm_config, AgxArmFactory
 import rospy
 from std_msgs.msg import Header
@@ -59,45 +53,45 @@ from cv_bridge import CvBridge
 register_default_resolvers()
 logger = get_logger(__name__)
 
-#==================== 异步推理全局变量 ==========================
+#================== Global variables for asynchronous inference =====================
 _action_prod_thread = None
 _action_stop_event = threading.Event()
 _action_lock = threading.Lock()
 
-_ACTION_CHUNK_SIZE_ORIGIN = 50  # 模型一次推理的步数
 _ACTION_DIM = 14
 
 _action_chunks = {}
 _control_t = 0
 
-# ========== 线程停止信号 (用于通知producer线程) ===============
+# ===================== For notifying the producer thread ===========================
 stop_signal = threading.Event() 
 
-#====================== 异步推理函数 ============================
-def clear_action_buffer(): # 清空缓存
+# ======================= Asynchronous inference functions ==========================
+def clear_action_buffer(): # Clear cache
     global _control_t, _action_chunks
     with _action_lock:
         _control_t = 0
         _action_chunks = {} # {cursor: chunk} 
 
-def temporal_ensembled_action(current_time):
-    """取当前时刻所有已推断的动作softmax加权平均"""
-    global _ACTION_CHUNK_SIZE_ORIGIN
+def rtc_get_action(current_time, action_horizon, exp_weight_factor=0.5):
+    """
+    Get the weighted average of all inferred actions at the current timestep)
+    """
     with _action_lock:
         relevant = {}
         to_delete = []
         before_keys = sorted(_action_chunks.keys())
 
         for cursor, chunk in _action_chunks.items():
-            end = cursor + _ACTION_CHUNK_SIZE_ORIGIN # 模型一次推理的步数
+            end = cursor + action_horizon 
             if cursor <= current_time < end:
-                # 还覆盖当前时刻 → 参与加权
+                # Still covers the current timestep → participates in weighting)
                 relevant[cursor] = chunk[current_time - cursor]
             elif end <= current_time:
-                # 整个chunk都过期了 → 标记删除
+                # The entire chunk has expired → mark for deletion
                 to_delete.append(cursor)
 
-        # 清理过期chunk，并打印关键状态用于排查是否正确删除
+        # Clean up expired chunks and print key status to troubleshoot if deletion is correct
         print(
             f"[action_chunks] t={current_time} before={before_keys} "
             f"delete={sorted(to_delete)}"
@@ -113,13 +107,15 @@ def temporal_ensembled_action(current_time):
         sorted_items = sorted(relevant.items(), key=lambda x: x[0])
         cur_actions = np.asarray([action for _, action in sorted_items])
 
-    exp_weights = np.exp(0.5 * np.arange(len(cur_actions)))
+    exp_weights = np.exp(exp_weight_factor * np.arange(len(cur_actions)))
     exp_weights = (exp_weights / exp_weights.sum())[:, None]
     sub_action = (cur_actions * exp_weights).sum(axis=0)
     return sub_action
 
 def _enqueue_chunk_to_expected_queues(chunk, cursor):
-    """将一个 chunk 存入字典"""
+    """
+    Store a chunk in the dictionary
+    """
     chunk = np.asarray(chunk, dtype=np.float32)
     if chunk.ndim != 2 or chunk.shape[1] != _ACTION_DIM:
         raise ValueError(f"Expected action chunk shape [T, {_ACTION_DIM}], got {chunk.shape}")
@@ -280,52 +276,55 @@ class RosOperator:
             rospy.Subscriber(self.args.img_front_depth_topic, Image, self.img_front_depth_callback, queue_size=1000, tcp_nodelay=True)
 
 class InferController:
-    def __init__(self):
+    def __init__(self, cfg: dict):
         self.client = None
-        self.left_channel = "can_left"
-        self.right_channel = "can_right"
-        self.bitrate = 1000000
+        self.rospy_rate = cfg.get("rospy_rate", 50)
+        self.left_channel = cfg.get("left_channel", "can_left")
+        self.right_channel = cfg.get("right_channel", "can_right")
+        self.bitrate = cfg.get("bitrate", 1000000)
         
-        # === 机械臂参数 ===
-        self.speed_pct = 15           # 速度百分比
-        self.max_linear_vel = 0.5     # m/s
-        self.max_angular_vel = 0.1  # rad/s
-        self.max_linear_acc = 0.1     # m/s2
-        self.max_angular_acc = 0.05    # rad/s2
+        # === Robot parameters ===
+        self.speed_pct = cfg.get("speed_pct", 15)           # velocity percentage
+        self.max_linear_vel = cfg.get("max_linear_vel", 0.5)     # max linear velocity (m/s)
+        self.max_angular_vel = cfg.get("max_angular_vel", 0.1)    # max angular velocity (rad/s)
+        self.max_linear_acc = cfg.get("max_linear_acc", 0.1)     # max linear acceleration (m/s2)
+        self.max_angular_acc = cfg.get("max_angular_acc", 0.05)   # max angular acceleration (rad/s2)
 
-        # === 夹爪对象 ===
+        # === Gripper objects ===
         self.left_gripper = None
         self.right_gripper = None
         
-        # === 初始位置 ===
-        self.LEFT_INIT_POSITION = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.05]
-        self.RIGHT_INIT_POSITION = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.05]
+        # === Initial position ===
+        self.LEFT_INIT_POSITION = cfg.get("LEFT_INIT_POSITION", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.05])
+        self.RIGHT_INIT_POSITION = cfg.get("RIGHT_INIT_POSITION", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.05])
 
-        # === 安全阈值 ===
-        self.ACTION_SAFETY_THRESHOLD = 1.5
-        self.STATE_SAFETY_THRESHOLD = 0.3
+        # === Safety thresholds ===
+        self.ACTION_SAFETY_THRESHOLD = cfg.get("ACTION_SAFETY_THRESHOLD", 1.5)
+        self.STATE_SAFETY_THRESHOLD = cfg.get("STATE_SAFETY_THRESHOLD", 0.3)
 
     def connect_arms(self):
-        """连接双臂并初始化夹爪"""
-        print("连接双臂...")
+        """
+        Connect dual arms and initialize grippers
+        """
+        print("连接双臂 (Connecting arms)...")
         try:
-            # --- 左臂 ---
+            # --- Left arm ---
             cfg_l = create_agx_arm_config(
                 robot="piper", comm="can", channel=self.left_channel, bitrate=self.bitrate
             )
             self.left_arm = AgxArmFactory.create_arm(cfg_l)
-            # 初始化夹爪
+            # Initialize gripper
             self.left_gripper = self.left_arm.init_effector(
                 self.left_arm.OPTIONS.EFFECTOR.AGX_GRIPPER
             )
             self.left_arm.connect()
             
-            # --- 右臂 ---
+            # --- Right arm ---
             cfg_r = create_agx_arm_config(
                 robot="piper", comm="can", channel=self.right_channel, bitrate=self.bitrate
             )
             self.right_arm = AgxArmFactory.create_arm(cfg_r)
-            # 初始化夹爪
+            # Initialize gripper
             self.right_gripper = self.right_arm.init_effector(
                 self.right_arm.OPTIONS.EFFECTOR.AGX_GRIPPER
             )
@@ -333,10 +332,10 @@ class InferController:
             
             time.sleep(0.5)
             if not (self.left_arm.is_ok() and self.right_arm.is_ok()):
-                raise Exception("机械臂连接状态检查失败")
+                raise Exception("机械臂连接状态检查失败 (Arm connection status check failed)")
             
-            # 设置速度和使能
-            for name, arm in [("左臂", self.left_arm), ("右臂", self.right_arm)]:
+            # Set speed and enable
+            for name, arm in [("左臂 (Left arm)", self.left_arm), ("右臂 (Right arm)", self.right_arm)]:
                 arm.set_flange_vel_acc_limits(
                     max_linear_vel=self.max_linear_vel,
                     max_angular_vel=self.max_angular_vel,
@@ -353,66 +352,73 @@ class InferController:
                         break
                     time.sleep(0.5)
                 if not enabled:
-                    raise Exception(f"{name} 使能超时")
+                    raise Exception(f"{name} 使能超时 (Enable timeout)")
                 
-            print("连接成功\n")
+            print("连接成功(Connected successfully)\n ")
             return True
             
         except Exception as e:
-            print(f"连接错误：{e}")
+            print(f"连接错误 (Connection error)：{e}")
             return False
     
     def get_status_and_state(self):
-        """获取当前状态：12 维关节 (6+6) + 2 维夹爪 (归一化) = 14 维"""
+        """
+        Get current state:
+        left arm joints [0:6], left gripper [6], right arm joints [7:13], right gripper [13]
+        """
         state = np.zeros(14, dtype=np.float32)
         try:
-            # 1. 左臂关节
+            # 1. Left arm joints
             ja_l = self.left_arm.get_joint_angles()
             if ja_l is not None: 
                 state[0:6] = ja_l.msg
             
-            # 2. 右臂关节
+            # 2. Right arm joints
             ja_r = self.right_arm.get_joint_angles()
             if ja_r is not None: 
                 state[7:13] = ja_r.msg
             
-            # 3. 左臂夹爪
+            # 3. Left arm gripper
             if self.left_gripper:
                 gs = self.left_gripper.get_gripper_status()
                 if gs is not None:
                     state[6] = gs.msg.value
             
-            # 4. 右臂夹爪
+            # 4. Right arm gripper
             if self.right_gripper:
                 gs = self.right_gripper.get_gripper_status()
                 if gs is not None:
                     state[13] = gs.msg.value
                     
         except Exception as e:
-            print(f"状态读取异常：{e}")
+            print(f"状态读取异常 (State reading exception)：{e}")
         return state
         
     def move(self, position_state):
-        """移动到特定位置"""
+        """
+        Move to specific position
+        """
         
         left_arm_position = position_state[0:6].tolist()
         right_arm_position = position_state[7:13].tolist()
         left_gripper_position = max(0.0, min(position_state[6], 0.1)) # width 0.0-0.1
         right_gripper_position = max(0.0, min(position_state[13], 0.1))
         try:
-            # 左臂
+            # Left arm
             self.left_arm.move_js(left_arm_position)
             self.left_gripper.move_gripper(width=left_gripper_position, force=1.0)
-            # 右臂
+            # Right arm
             self.right_arm.move_js(right_arm_position)
             self.right_gripper.move_gripper(width=right_gripper_position, force=1.0)
             
             time.sleep(0.02)
         except Exception as e:
-            print(f"移动失败：{e}")
+            print(f"移动失败 (Move failed)：{e}")
     
     def move_initial(self, position_state):
-        """移动到初始位置"""
+        """
+        Move to initial position
+        """
         n=50
         left_arm_position = position_state[0:6].tolist()
         right_arm_position = position_state[7:13].tolist()
@@ -423,19 +429,16 @@ class InferController:
         try:
            for i in range(n):
                 print(left_traj[i],right_traj[i])
-                # 左臂
+                # Left arm
                 self.left_arm.move_js(left_traj[i].tolist())
                 self.left_gripper.move_gripper(width=left_gripper_position, force=1.0)
-                # 右臂
+                # Right arm
                 self.right_arm.move_js(right_traj[i].tolist())
                 self.right_gripper.move_gripper(width=right_gripper_position, force=1.0)
                 time.sleep(0.02)
         except Exception as e:
-            print(f"移动失败：{e}")
+            print(f"移动失败 (Move failed)：{e}")
  
-
-
-
 @dataclass
 class RealObservation:
     cam_high: np.ndarray
@@ -443,17 +446,16 @@ class RealObservation:
     cam_right_wrist: np.ndarray
     state: np.ndarray
 
-
 class ObservationProvider(Protocol):
     def get_observation(self,ros_operator,infercontroller) -> RealObservation:
-        rate = rospy.Rate(50)
+        rate = rospy.Rate(infercontroller.rospy_rate)
         print_flag_local = True
         while not rospy.is_shutdown():
-            # 采帧（必要时等待）
+            # Capture frame (wait if necessary)
             result = ros_operator.get_frame()
             if not result:
                 if print_flag_local:
-                    print("async syn fail")
+                    print("async syn fail (Async synchronization failed)")
                     print_flag_local = False
                 rate.sleep()
                 continue
@@ -461,7 +463,7 @@ class ObservationProvider(Protocol):
         print_flag_local = True
         (img_h,img_l, img_r, img_h_depth, img_l_depth, img_r_depth) = result
         
-        # 构建obs
+        # Pack observation
         return RealObservation(
             cam_high=img_h,
             cam_left_wrist=img_l,
@@ -469,11 +471,9 @@ class ObservationProvider(Protocol):
             state=infercontroller.get_status_and_state(),
         )
 
-
 class RobotController(Protocol):
     def execute_action_chunk(self, actions: np.ndarray, execute_steps: int,infercontroller) -> None:
         raise NotImplementedError
-
 
 class FileObservationProvider:
     def __init__(
@@ -496,7 +496,6 @@ class FileObservationProvider:
             state=load_state_vector(self.state_path),
         )
 
-
 class DryRunController:
     def execute_action_chunk(self, actions: np.ndarray, execute_steps: int, infercontroller=None) -> None:
         actions = np.asarray(actions)
@@ -505,17 +504,16 @@ class DryRunController:
         steps = min(int(execute_steps), int(actions.shape[0]))
         logger.info("Dry-run mode: not executing %d predicted actions.", steps)
 
-
 class RealRobotObservationProvider:
     def get_observation(self,ros_operator,infercontroller) -> RealObservation:
-        rate = rospy.Rate(50)
+        rate = rospy.Rate(infercontroller.rospy_rate)
         print_flag_local = True
         while not rospy.is_shutdown():
-            # 采帧（必要时等待）
+            # Capture frame (wait if necessary)
             result = ros_operator.get_frame()
             if not result:
                 if print_flag_local:
-                    print("async syn fail")
+                    print("async syn fail (Async synchronization failed)")
                     print_flag_local = False
                 rate.sleep()
                 continue
@@ -523,7 +521,7 @@ class RealRobotObservationProvider:
         print_flag_local = True
         (img_h,img_l, img_r, img_h_depth, img_l_depth, img_r_depth) = result
         
-        # 构建obs
+        # Pack observation
         return RealObservation(
             cam_high=img_h,
             cam_left_wrist=img_l,
@@ -531,15 +529,9 @@ class RealRobotObservationProvider:
             state=infercontroller.get_status_and_state(),
         )
 
-        # raise NotImplementedError(
-        #     "Connect your camera/robot SDK here and return cam_high, "
-        #     "cam_left_wrist, cam_right_wrist, and a 14-dim state vector."
-        # )
-
-
 class RealRobotController:
     def execute_action_chunk(self, actions: np.ndarray, execute_steps: int,infercontroller) -> None:
-        rate=rospy.Rate(50)
+        rate=rospy.Rate(infercontroller.rospy_rate)
         try:
             actions = np.asarray(actions, dtype=np.float32)
             if actions.ndim == 1:
@@ -551,39 +543,22 @@ class RealRobotController:
                 infercontroller.move(actions[i])
                 rate.sleep()
         except Exception as e:
-            print(f"执行异常：{e}")
-        # raise NotImplementedError(
-        #     "Connect your robot controller here. Add action limits, workspace "
-        #     "checks, speed limits, and emergency-stop handling before use."
-        # )
-
+            print(f"执行异常 (Execution exception)：{e}")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run FastWAM real-ckpt action inference.")
-    parser.add_argument("--ckpt", required=True, help="Path to runs/.../checkpoints/weights/step_xxxxxx.pt.")
-    parser.add_argument("--dataset-stats", required=True, help="Path to runs/.../dataset_stats.json.")
+    
     parser.add_argument("--task", default="real_cleaning_uncond_3cam_384_1e-4")
     parser.add_argument("--config-dir", default="configs")
     parser.add_argument("--train-config", default=None, help="Optional saved runs/.../config.yaml.")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--mixed-precision", choices=["no", "fp16", "bf16"], default="bf16")
-    parser.add_argument("--prompt", default="clean the table")
-    parser.add_argument("--context-cache-dir", default=None)
-    parser.add_argument("--use-text-encoder", action="store_true")
-    parser.add_argument("--action-horizon", type=int, default=32)
-    parser.add_argument("--num-inference-steps", type=int, default=10)
-    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--rand-device", default="cpu")
     parser.add_argument("--cam-high", default=None)
     parser.add_argument("--cam-left-wrist", default=None)
     parser.add_argument("--cam-right-wrist", default=None)
     parser.add_argument("--state-json", default=None)
-    parser.add_argument("--output-actions", default="predicted_actions.npy")
-    parser.add_argument("--output-actions-json", default=None)
-    parser.add_argument("--execute-steps", type=int, default=1)
-    parser.add_argument("--num-replans", type=int, default=1)
-    parser.add_argument("--replan-sleep", type=float, default=0.0)
-    parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--deploy-config", default="configs/deploy_real_rtc.yaml", help="Path to deploy configuration yaml")
     
     #ros
     parser.add_argument('--img_front_topic', action='store', type=str, default='/camera_h/color/image_raw', required=False)
@@ -838,17 +813,39 @@ def predict_action_chunk(
     return denormalize_actions(processor, output["action"])
 
 
-def save_actions(actions: torch.Tensor | np.ndarray, output_npy: str | Path, output_json: str | Path | None) -> None:
+def save_actions(actions: torch.Tensor | np.ndarray, output_npy: str | Path, output_json: str | Path | None, folder_type: str | None, episode_idx_dict: dict | None ) -> None:
     if isinstance(actions, torch.Tensor):
         actions_np = actions.detach().cpu().numpy().astype(np.float32)
     else:
         actions_np = np.asarray(actions, dtype=np.float32)
-    np.save(output_npy, actions_np)
-    logger.info("Saved predicted actions to %s with shape %s.", output_npy, actions_np.shape)
+    
+    if folder_type not in episode_idx_dict:
+        episode_idx_dict[folder_type] = 0
+    
+    current_idx = episode_idx_dict[folder_type]
+    episode_idx_dict[folder_type] += 1
+    npy_path = Path(output_npy)
+    
+    target_dir = npy_path.parent / folder_type
+    new_filename = f"{npy_path.stem}_{current_idx}{npy_path.suffix}"
+    
+    indexed_npy = target_dir / new_filename
+    indexed_npy.parent.mkdir(parents=True, exist_ok=True)
+
+    np.save(indexed_npy, actions_np)
+    logger.info("Saved predicted actions to %s with shape %s.", indexed_npy, actions_np.shape)
+    
     if output_json:
-        with open(output_json, "w", encoding="utf-8") as file:
+        json_path = Path(output_json)
+        target_json_dir = json_path.parent / folder_type
+        new_json_filename = f"{json_path.stem}_{current_idx}{json_path.suffix}"
+        indexed_json = target_json_dir / new_json_filename
+        
+        indexed_json.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(indexed_json, "w", encoding="utf-8") as file:
             json.dump({"action": actions_np.tolist()}, file, ensure_ascii=False, indent=2)
-        logger.info("Saved predicted actions JSON to %s.", output_json)
+        logger.info("Saved predicted actions JSON to %s.", indexed_json)
 
 
 def build_runtime_io(args: argparse.Namespace) -> tuple[ObservationProvider, RobotController]:
@@ -857,85 +854,189 @@ def build_runtime_io(args: argparse.Namespace) -> tuple[ObservationProvider, Rob
     return RealRobotObservationProvider(), RealRobotController()
 
 
-def run() -> None:
+def load_deploy_config(args: argparse.Namespace) -> dict:
+    import yaml
+    with open(args.deploy_config, "r", encoding="utf-8") as f:
+        deploy_cfg = yaml.safe_load(f)
+        
+    # Dynamically map YAML values into argparse Namespace
+    for key, value in deploy_cfg.items():
+        setattr(args, key, value)
+        
+    if not getattr(args, "ckpt", None):
+        raise ValueError("Missing 'ckpt' parameter. Define it in deploy_real_rtc.yaml")
+    if not getattr(args, "dataset_stats", None):
+        raise ValueError("Missing 'dataset_stats' parameter. Define it in deploy_real_rtc.yaml")
 
+    return deploy_cfg
+
+def run() -> None:
     args = parse_args()
-    global _ACTION_CHUNK_SIZE_ORIGIN
-    _ACTION_CHUNK_SIZE_ORIGIN = args.action_horizon
+    deploy_cfg = load_deploy_config(args)
+    
     setup_logging(log_level=logging.INFO)
     model, processor, cfg = load_model_and_processor(args)
     prompt, context, context_mask = resolve_text_condition(args, cfg)
     provider, controller = build_runtime_io(args)
     
     ros_operator = RosOperator(args)
-    infer_controller = InferController()
+    infer_controller = InferController(deploy_cfg)
     if not infer_controller.connect_arms():
         return False
     
-    rate = rospy.Rate(50)
+    rate = rospy.Rate(args.rospy_rate)
     initial_position = np.concatenate((infer_controller.LEFT_INIT_POSITION, infer_controller.RIGHT_INIT_POSITION)).astype(np.float32)
-    infer_controller.move_initial(initial_position)
 
-    clear_action_buffer()
     global _action_prod_thread, _control_t
-    t = 0
     
-    input("按回车键开始模型推理...")
-    _action_prod_thread = threading.Thread(
-        target=_action_producer_loop,
-        args=(ros_operator, infer_controller, model, processor, prompt, provider, context, context_mask, args),
-        daemon=True,
-    )
-    _action_prod_thread.start()
-    last_action = initial_position
-    try:
-        while True:
-            while not rospy.is_shutdown() and not stop_signal.is_set():
-                with _action_lock:
-                    _control_t = t
-                # Temporal Ensembling提取当前t动作
-                action = temporal_ensembled_action(t)
-                if action is None or len(action) == 0:
-                    print(f"[WAITING] Waiting for action...")
-                    rate.sleep()
-                    continue
-                action = np.asarray(action, dtype=np.float32)
-                if action.shape != (_ACTION_DIM,):
-                    print(f"执行异常：Expected action shape [{_ACTION_DIM}], got {action.shape}")
+    episode_idx_dict = args.episode_idx_dict
+    success_count = 0
+    total_count = 0
+
+    while True:
+        # reset for saving actions
+        actions_record=[]
+
+        infer_controller.move_initial(initial_position)
+        clear_action_buffer()
+        t = 0
+        
+        input("按回车键开始模型推理 (Press Enter to start model inference)...")
+        
+        # Set terminal to non-blocking mode (for detecting space)
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+        
+        _action_stop_event.clear()
+        stop_signal.clear()
+        try:
+            # Clear backlogged key presses
+            while True:
+                r, _, _ = select.select([sys.stdin], [], [], 0)
+                if r:
+                    sys.stdin.read(1)
+                else:
                     break
-                            
-                # 安全检查
-                prev_curr_l1 = np.mean(np.abs(action - last_action))
-                if prev_curr_l1 > infer_controller.ACTION_SAFETY_THRESHOLD:
-                    print(f"\033[31m 安全检查失败：动作变化过大 {prev_curr_l1:.3f}\033[0m")
-                    break
-                current_state =  infer_controller.get_status_and_state()
-                # 检查动作与当前状态的差异 (防止跳变)
-                prev_state_l1 = np.mean(np.abs(current_state - last_action))
-                if prev_state_l1 >  infer_controller.STATE_SAFETY_THRESHOLD:
-                    print(f"\033[31m 安全检查失败：状态差异过大 {prev_state_l1:.3f}\033[0m")
-                    break
-                last_action = action
-                print(f"待执行action: {action}")
-                try:
-                    controller.execute_action_chunk(action, args.execute_steps,infer_controller)
-                    # rate.sleep()
-                except Exception as e:
-                    print(f"执行异常：{e}")
                 
-                t += 1
-                rate.sleep()
-                if last_action is not None:
-                    save_actions(last_action, args.output_actions, args.output_actions_json)
-    except Exception as e:
-            print(f"\n错误：{e}")
-    finally:
-        _cleanup()
+            _action_prod_thread = threading.Thread(
+                target=_action_producer_loop,
+                args=(ros_operator, infer_controller, model, processor, prompt, provider, context, context_mask, args),
+                daemon=True,
+            )
+            _action_prod_thread.start()
+            last_action = initial_position
+            try:
+                while not rospy.is_shutdown() and not stop_signal.is_set():
+                    # Detect space key to stop
+                    r, _, _ = select.select([sys.stdin], [], [], 0)
+                    if r:
+                        key = sys.stdin.read(1)
+                        if key == ' ':
+                            print("\n[键盘中断] 检测到空格键，停止当前推理([Keyboard Interrupt] Detected space key, stopping inference)...")
+                            break
+
+                    with _action_lock:
+                        _control_t = t
+                    # RTC extracts current action at t
+                    action = rtc_get_action(t, args.action_horizon, args.exp_weight_factor)
+                    if action is None or len(action) == 0:
+                        print(f"[WAITING] Waiting for action...")
+                        rate.sleep()
+                        continue
+                    action = np.asarray(action, dtype=np.float32)
+                    if action.shape != (_ACTION_DIM,):
+                        print(f"执行异常 (Execution exception)：Expected action shape [{_ACTION_DIM}], got {action.shape}")
+                        break
+                                
+                    # Safety check
+                    prev_curr_l1 = np.mean(np.abs(action - last_action))
+                    if prev_curr_l1 > infer_controller.ACTION_SAFETY_THRESHOLD:
+                        print(f"\033[31m 安全检查失败：动作变化过大 (Safety check failed: Action change too much) {prev_curr_l1:.3f}\033[0m")
+                        break
+                    current_state =  infer_controller.get_status_and_state()
+                    # Check difference between action and current state to prevent jumping
+                    prev_state_l1 = np.mean(np.abs(current_state - last_action))
+                    if prev_state_l1 >  infer_controller.STATE_SAFETY_THRESHOLD:
+                        print(f"\033[31m 安全检查失败：状态差异过大 (Safety check failed: State difference too large) {prev_state_l1:.3f}\033[0m")
+                        break
+                    last_action = action
+                    print(f"待执行 (Pending execution) action: {action}")
+                    try:
+                        controller.execute_action_chunk(action, args.execute_steps,infer_controller)
+                        # rate.sleep()
+                    except Exception as e:
+                        print(f"执行异常 (Execution exception)：{e}")
+                    
+                    t += 1
+                    rate.sleep()
+                    if last_action is not None:
+                        actions_record.append(last_action.copy())
+            except Exception as e:
+                    print(f"\n错误 (Error)：{e}")
+            finally:
+                _cleanup()
+
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            termios.tcflush(fd, termios.TCIFLUSH)
+            
+        if rospy.is_shutdown():
+            break
+
+        # Stop producer thread
+        stop_signal.set() 
+        _action_stop_event.set()
+        if _action_prod_thread is not None and _action_prod_thread.is_alive():
+            _action_prod_thread.join(timeout=2.0)
+        
+        # Ask if successful
+        user_input = input("Success? Enter 'y' or 'n': ")
+        success = True if user_input.lower() == 'y' else False
+        
+        if success:
+            success_count += 1
+        total_count += 1
+        
+        user_input = input("Save this episode? Enter 'y'(success/fail), or 'n'(no): ")
+        save = False
+        folder_type = ""
+        
+        if user_input.lower() == 'y':
+            save = True
+            if success==True:
+                folder_type = "success"
+            else:
+                folder_type = "fail"
+        elif user_input.lower() == 'n':
+            save = False
+        
+        if save:
+            save_actions(actions_record, args.output_actions, args.output_actions_json, folder_type, episode_idx_dict)
+        
+        # Calculate success rate
+        try:
+            success_rate = success_count / total_count * 100
+        except:
+            success_rate = 0.0
+        
+        print("\n" + "="*50)
+        print("当前测试次数(present rollout episodes):", total_count)
+        print("此次是否成功(success?):", "是" if success else "否")
+        print("当前成功率(success rate):", f"{success_rate:.2f}%")
+        print("当前成功次数(present successful episodes):", success_count, "总测试次数(total episodes):", total_count)
+        print("="*50 + "\n")
+        
+        continue_input = input("继续下一次测试？(Continue to next episode?) Enter 'y' or 'n': ")
+        if continue_input.lower() != 'y':
+            break  
 
 def _action_producer_loop(ros_operator,infer_controller,model,processor,prompt,provider,context,context_mask,args):
-    """后台线程：采帧→请求server→写入历史缓存"""
+    """
+    Background thread: Capture frame -> Inference -> Write to history cache)
+    """
     global _control_t, _action_chunks
-    rate = rospy.Rate(50)  
+    rate = rospy.Rate(args.rospy_rate)  
     while not _action_stop_event.is_set() and not rospy.is_shutdown()and not stop_signal.is_set():
         with _action_lock:
             cursor = _control_t
@@ -963,13 +1064,15 @@ def _action_producer_loop(ros_operator,infer_controller,model,processor,prompt,p
         rate.sleep()
 
 def _cleanup():
-    """程序退出时的清理工作（统一管理）"""
-    print("\n正在退出...")
+    """
+    Cleanup when the program exits
+    """
+    print("\n正在退出 (Exiting)...")
     _action_stop_event.set()
     
     if _action_prod_thread is not None and _action_prod_thread.is_alive():
         _action_prod_thread.join(timeout=2.0)
-        print("producer线程已停止")
+        print("producer线程已停止 (Producer thread stopped)")
     
     print("Inference stopped.")
 if __name__ == "__main__":
