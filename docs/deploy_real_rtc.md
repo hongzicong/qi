@@ -1,11 +1,11 @@
 # Deploying FastWAM on Real Robots (Real-Time Chunking)
 
-This guide documents how to use `tests/deploy_real_rtc.py` to run FastWAM inferences on real dual-arm robots with real-time chunking.
+This guide documents how to use `tests/real_robot/deploy_real_rtc.py` to run FastWAM inferences on real dual-arm robots with real-time chunking.
 
 ## Usage
 
 ```bash
-uv run python tests/deploy_real_rtc.py --deploy-config configs/deploy_real_rtc.yaml
+python tests/real_robot/deploy_real_rtc.py --deploy-config configs/deploy_real_rtc.yaml
 ```
 
 During execution, press **Enter** to start the inference loop. Whenever you want to stop the current trial and save the actions locally, press the **Space** key. The script will wait for your confirmation to proceed to the next inference cycle.
@@ -59,7 +59,7 @@ To prepopulate the cache for your prompts, compute the text embeddings offline b
 export DIFFSYNTH_DOWNLOAD_SOURCE=huggingface
 export DIFFSYNTH_MODEL_BASE_PATH="$(pwd)/checkpoints"
 
-python tests/precompute_text_embeds.py \
+python tests/real_robot/precompute_text_embeds.py \
   data=your_data_name \
   model=fastwam \
   '+override_instruction="your prompt"' \
@@ -80,7 +80,7 @@ use_text_encoder: false
 If you want dynamic prompts without precomputing embeddings, you can set `use_text_encoder: true` inside the YAML, or launch with an override flag:
 
 ```bash
-uv run python tests/deploy_real_rtc.py --use-text-encoder
+python tests/real_robot/deploy_real_rtc.py --use-text-encoder
 ```
 
 *Note: Enabling this option loads the full tokenizer and text encoder into memory during reasoning. This will result in a noticeably slower startup time and higher VRAM consumption.*

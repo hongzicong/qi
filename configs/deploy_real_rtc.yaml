@@ -17,7 +17,7 @@ ACTION_SAFETY_THRESHOLD: 1.5     # maximum difference between last action and ac
 STATE_SAFETY_THRESHOLD: 0.3       # maximum difference between current state and action pending execution
 
 # Inference properties
-ckpt: "your_ckpt_path"  # Path to .../checkpoints/weights/step_xxxxxx.pt
+ckpt: "your_ckpt_path"  # Path to .../checkpoints/.../step_xxxxxx.pt
 dataset_stats: "your_dataset_stats_path"  # Path to .../dataset_stats.json
 prompt: "your prompt"  # Task prompt for text conditioning
 context_cache_dir:  "your_text_embedding_cache_dir"  # Optional text embedding cache directory
