@@ -176,7 +176,7 @@ def main(cfg: DictConfig):
         logger.info("Distributed enabled: world_size=%d", world_size)
     if (not is_distributed) and torch.cuda.is_available() and torch.cuda.device_count() > 1:
         logger.info(
-            "Multi-GPU available. To use it, run: torchrun --standalone --nproc_per_node=%d scripts/precompute_text_embeds.py",
+            "Multi-GPU available. To use it, run: torchrun --standalone --nproc_per_node=%d precompute_text_embeds.py",
             torch.cuda.device_count(),
         )
 
