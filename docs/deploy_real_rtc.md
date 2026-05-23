@@ -67,7 +67,7 @@ python tests/real_robot/precompute_text_embeds.py \
 ```
 The embeddings will be stored in the `text_embedding_cache_dir` in your dataset's YAML config. 
 
-*Note: Make sure `your_data_name` aligns exactly with your dataset's YAML config filename inside the `configs/data/`,for example `real_cleaning2task.yaml`.*
+*Note: Make sure `your_data_name` aligns exactly with your dataset's YAML config filename inside the `configs/data/` directory, for example `real_cleaning2task.yaml`.*
 
 Then, configure the directory path in `deploy_real_rtc.yaml`:
 ```yaml
