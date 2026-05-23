@@ -14,7 +14,7 @@ model:
   action_dit_pretrained_path: null
 
 EVALUATION:
-  robotwin_root: third_party/RoboTwin
+  robotwin_root: tests/third_party/RoboTwin
   policy_name: fastwam_policy
   task_name: null
   task_config: demo_randomized
@@ -32,6 +32,10 @@ EVALUATION:
   rand_device: cpu
   tiled: false
   timing_enabled: false
+  expert_cache: false
+  expert_cache_reuse_steps: 1
+  expert_cache_warmup_steps: 1
+  expert_cache_cooldown_steps: 1
   skip_get_obs_within_replan: true
 
   # Runtime inputs
