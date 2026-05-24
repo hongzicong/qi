@@ -25,12 +25,15 @@ dependencies = [
   "packaging==25.0",
   "pandas==2.2.3",
   "pillow==12.0.0",
+  "pyAgxArm @ git+https://github.com/agilexrobotics/pyAgxArm.git",
   "pyarrow==23.0.0",
   "regex==2025.11.3",
   "rich==14.2.0",
   "safetensors==0.5.3",
+  "rospkg==1.5.0",
   "termcolor==2.5.0",
   "torchcodec==0.5",
+  "torchvision==0.27.0",
   "tqdm==4.66.5",
   "transformers==4.49.0",
   "typing-extensions==4.15.0",
@@ -43,6 +46,7 @@ dependencies = [
   "mplib==0.2.1",
   "warp-lang==1.12.0",
   "toppra==0.6.3"
+  
 ]
 
 [tool.setuptools.package-dir]
