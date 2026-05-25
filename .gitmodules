@@ -1,3 +1,6 @@
 [submodule "tests/third_party/RoboTwin"]
 	path = tests/third_party/RoboTwin
 	url = https://github.com/RoboTwin-Platform/RoboTwin.git
+[submodule "tests/third_party/LIBERO"]
+	path = tests/third_party/LIBERO
+	url = https://github.com/Lifelong-Robot-Learning/LIBERO.git
