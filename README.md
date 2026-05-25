@@ -48,7 +48,7 @@ Unlike general-purpose inference runtimes, Qi is designed around the unique dema
 
 ## Performance
 
-### Per-action chunk latency on A100
+### Per-action chunk latency on NVIDIA A100
 
 | Metric (ms) | Baseline | +DiT Cache | +CUDA Graph | +`torch.compile` |
 |-------------|----------|------------|-------------|------------------|
@@ -62,7 +62,7 @@ Unlike general-purpose inference runtimes, Qi is designed around the unique dema
 | Mean                | 1.52×      | 3.70×       | 4.87×            |
 | P99                 | 1.45×      | 3.61×       | 4.69×            |
 
-### Per-action chunk latency on 4090
+### Per-action chunk latency on NVIDIA RTX 4090
 
 | Metric (ms) | Baseline | +DiT Cache | +CUDA Graph | +`torch.compile` |
 |-------------|----------|------------|-------------|------------------|
@@ -76,7 +76,7 @@ Unlike general-purpose inference runtimes, Qi is designed around the unique dema
 | Mean                | 1.50×      | 2.19×       | 2.71×            |
 | P99                 | 1.50×      | 2.20×       | 2.64×            |
 
-### Per-action chunk latency on jetson
+### Per-action chunk latency on Jetson Orin 64G
 
 | Metric (ms) | Baseline | +DiT Cache | +CUDA Graph | +`torch.compile` |
 |-------------|----------|------------|-------------|------------------|

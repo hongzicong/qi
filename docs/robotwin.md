@@ -18,8 +18,6 @@ Download the released RobotWin checkpoint and its matching dataset stats, or use
 your own trained checkpoint and stats file.
 
 ```bash
-pip install -U huggingface_hub
-
 huggingface-cli download yuanty/fastwam \
   robotwin_uncond_3cam_384.pt \
   robotwin_uncond_3cam_384_dataset_stats.json \
