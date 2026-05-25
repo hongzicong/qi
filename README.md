@@ -48,7 +48,7 @@ Unlike general-purpose inference runtimes, Qi is designed around the unique dema
 
 ## Performance
 
-### Per-action chunk latency on A100
+### Per-action chunk latency on NVIDIA A100
 
 | Metric (ms) | Baseline | +DiT Cache | +CUDA Graph | +`torch.compile` |
 |-------------|----------|------------|-------------|------------------|
@@ -62,7 +62,7 @@ Unlike general-purpose inference runtimes, Qi is designed around the unique dema
 | Mean                | 1.52×      | 3.70×       | 4.87×            |
 | P99                 | 1.45×      | 3.61×       | 4.69×            |
 
-### Per-action chunk latency on 4090
+### Per-action chunk latency on NVIDIA RTX 4090
 
 | Metric (ms) | Baseline | +DiT Cache | +CUDA Graph | +`torch.compile` |
 |-------------|----------|------------|-------------|------------------|
@@ -76,7 +76,7 @@ Unlike general-purpose inference runtimes, Qi is designed around the unique dema
 | Mean                | 1.50×      | 2.19×       | 2.71×            |
 | P99                 | 1.50×      | 2.20×       | 2.64×            |
 
-### Per-action chunk latency on jetson
+### Per-action chunk latency on Jetson Orin 64G
 
 | Metric (ms) | Baseline | +DiT Cache | +CUDA Graph | +`torch.compile` |
 |-------------|----------|------------|-------------|------------------|
@@ -107,6 +107,19 @@ Each + column is cumulative (e.g. +CUDA Graph includes DiT Cache).
   - [x] torch.compile
   - [ ] Kernel customization
 - [ ] World-action model zoo
+  - [x] [FastWAM](https://github.com/yuantianyuan01/FastWAM)
+
+---
+
+## Contributing
+
+We welcome anyone who has trained their own world action model to reach out to us — we'd love to help accelerate your work. Feel free to contact us at zicong.hong@epfl.ch.
+
+---
+
+## License
+
+Qi is released under the [Apache 2.0 License](LICENSE).
 
 ---
 
@@ -121,18 +134,6 @@ The name **Qi** (器, *qì*) comes from a foundational line in the *I Ching* (*Z
 In classical Chinese thought, **Dao** (道) is the formless principle — the underlying law of the world. **Qi** (器) is the vessel, the concrete instrument through which Dao manifests and acts.
 
 We adopt this framing for a simple reason: **器以载道** — *the vessel carries the Dao*. A world action model encodes a deep understanding of how the world works and how actions ripple through it. **Qi** is the engine that gives this model a body — fast, precise, and real-time — so that understanding can become action.
-
----
-
-## Contributing
-
-We welcome contributions. Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on submitting issues, feature requests, and pull requests.
-
----
-
-## License
-
-Qi is released under the [Apache 2.0 License](LICENSE).
 
 ---
 
