@@ -8,6 +8,11 @@ from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
+from qi.quantization import (
+    checkpoint_is_quantized,
+    load_checkpoint_payload,
+    prepare_model_for_quantized_checkpoint,
+)
 from qi.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -43,6 +48,15 @@ def load_config(args: argparse.Namespace) -> DictConfig:
 def load_model(args: argparse.Namespace, cfg: DictConfig) -> Any:
     model_dtype = dtype_from_mixed_precision(args.mixed_precision)
     model = instantiate(cfg.model, model_dtype=model_dtype, device=args.device)
+    payload = load_checkpoint_payload(args.ckpt)
+    if checkpoint_is_quantized(payload):
+        quant_cfg = prepare_model_for_quantized_checkpoint(model, payload)
+        logger.info(
+            "Detected quantized checkpoint: algo=%s bits=%s backend=%s.",
+            quant_cfg.algo,
+            quant_cfg.bits,
+            quant_cfg.backend,
+        )
     payload = model.load_checkpoint(args.ckpt)
     model.eval()
     logger.info("Loaded checkpoint %s with keys %s.", args.ckpt, sorted(payload.keys()))
