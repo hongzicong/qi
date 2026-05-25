@@ -108,6 +108,10 @@ Each + column is cumulative (e.g. +CUDA Graph includes DiT Cache).
   - [ ] Kernel customization
 - [ ] World-action model zoo
   - [x] [FastWAM](https://github.com/yuantianyuan01/FastWAM)
+- [ ] Real-time Chunking
+- [ ] Robotics Dataset
+  - [x] Libero
+  - [x] RoboTwin
 
 ---
 
