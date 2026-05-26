@@ -12,7 +12,7 @@ huggingface-cli download m1ku2/fastwam_pick_numbered_blocks \
   --local-dir $DIFFSYNTH_MODEL_BASE_PATH
 ```
 
-## Run Open-Loop Video Dry Run (10 Diffusion Steps, 10 Chunks)
+## Run Open-Loop Video Dry Run (10 Diffusion Steps, 20 Chunks)
 
 ### Baseline
 
