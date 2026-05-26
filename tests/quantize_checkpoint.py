@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quant-dtype", choices=["int", "nvfp4"], default="int")
     parser.add_argument(
         "--quant-backend",
-        choices=["reference", "flashrt", "cuda_ext", "flashrt_nvfp4"],
+        choices=["reference", "cuda_ext", "flashrt_nvfp4"],
         default="reference",
     )
     parser.add_argument("--quant-bits", type=int, default=8)

@@ -12,7 +12,7 @@ class WeightOnlyQuantConfig:
     bits: int = 8
     group_size: int = 128
     symmetric: bool = True
-    backend: Literal["reference", "flashrt", "cuda_ext", "flashrt_nvfp4"] = "reference"
+    backend: Literal["reference", "cuda_ext", "flashrt_nvfp4"] = "reference"
 
     target_expert: Literal["all", "both", "action", "video"] = "all"
     action_expert_markers: tuple[str, ...] = ("action_expert", "action")
@@ -45,7 +45,6 @@ class WeightOnlyQuantConfig:
                 raise ValueError("FlashRT NVFP4 backend requires `group_size=16`.")
             if not self.symmetric:
                 raise ValueError("FlashRT NVFP4 backend currently expects symmetric quantization.")
-        if self.backend == "flashrt" and self.bits != 4:
-            raise ValueError("FlashRT backend currently expects 4-bit weights.")
         if not 0.0 <= float(self.awq_alpha) <= 1.0:
             raise ValueError(f"`awq_alpha` must be in [0, 1], got {self.awq_alpha}.")
+

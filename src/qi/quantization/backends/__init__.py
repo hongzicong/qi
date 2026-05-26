@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from .flashrt import FlashRTBackend, FlashRTNVFP4Backend
+from .flashrt_nvfp4_ops import FlashRTNVFP4Backend
 from .reference import CudaExtBackend, QuantBackend, ReferenceBackend
 
 
 def get_backend(name: str) -> QuantBackend:
     if name == "reference":
         return ReferenceBackend()
-    if name == "flashrt":
-        return FlashRTBackend()
     if name == "cuda_ext":
         return CudaExtBackend()
     if name == "flashrt_nvfp4":
@@ -18,7 +16,6 @@ def get_backend(name: str) -> QuantBackend:
 
 __all__ = [
     "CudaExtBackend",
-    "FlashRTBackend",
     "FlashRTNVFP4Backend",
     "QuantBackend",
     "ReferenceBackend",
