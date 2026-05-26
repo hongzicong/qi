@@ -14,6 +14,8 @@ from .quantize import (
     dequantize_weight,
     quantize_linear_weight,
     quantize_weight_awq,
+    quantize_weight_nvfp4_awq,
+    quantize_weight_nvfp4_rtn,
     quantize_weight_rtn,
 )
 from .swap import prepare_model_for_weight_only_load, replace_linear_with_weight_only, should_quantize
@@ -32,6 +34,8 @@ __all__ = [
     "quantize_linear_weight",
     "quantize_loaded_model",
     "quantize_weight_awq",
+    "quantize_weight_nvfp4_awq",
+    "quantize_weight_nvfp4_rtn",
     "quantize_weight_rtn",
     "replace_linear_with_weight_only",
     "save_quantized_checkpoint",

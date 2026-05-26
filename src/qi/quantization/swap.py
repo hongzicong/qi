@@ -86,10 +86,34 @@ def _state_prefix(container_key: str | None, module_name: str) -> str:
     return prefix
 
 
-def _state_has_key(state_dict: Mapping[str, object] | None, container_key: str | None, module_name: str, key: str) -> bool:
+def _state_key(container_key: str | None, module_name: str, key: str) -> str:
+    return f"{_state_prefix(container_key, module_name)}{key}"
+
+
+def _state_tensor(
+    state_dict: Mapping[str, object] | None,
+    container_key: str | None,
+    module_name: str,
+    key: str,
+) -> torch.Tensor | None:
     if state_dict is None:
-        return False
-    return f"{_state_prefix(container_key, module_name)}{key}" in state_dict
+        return None
+    value = state_dict.get(_state_key(container_key, module_name, key))
+    return value if isinstance(value, torch.Tensor) else None
+
+
+def _state_empty_like(
+    state_dict: Mapping[str, object] | None,
+    container_key: str | None,
+    module_name: str,
+    key: str,
+) -> torch.Tensor | None:
+    tensor = _state_tensor(state_dict, container_key, module_name, key)
+    return None if tensor is None else torch.empty_like(tensor)
+
+
+def _state_has_key(state_dict: Mapping[str, object] | None, container_key: str | None, module_name: str, key: str) -> bool:
+    return _state_tensor(state_dict, container_key, module_name, key) is not None
 
 
 def replace_linear_with_weight_only(
@@ -141,6 +165,28 @@ def prepare_model_for_weight_only_load(
 
             qweight = torch.empty((out_features, in_features), dtype=torch.int8)
             scales = torch.empty((out_features, num_groups), dtype=torch.float32)
+            qweight_packed = None
+            scale_factors = None
+            weight_global_scale = None
+            if getattr(cfg, "quant_dtype", "int") == "nvfp4":
+                qweight = None
+                scales = None
+                qweight_packed = _state_empty_like(state_dict, container_key, full_name, "qweight_packed")
+                scale_factors = _state_empty_like(state_dict, container_key, full_name, "scale_factors")
+                weight_global_scale = _state_empty_like(
+                    state_dict,
+                    container_key,
+                    full_name,
+                    "weight_global_scale",
+                )
+                if qweight_packed is None or scale_factors is None or weight_global_scale is None:
+                    prefix = _state_prefix(container_key, full_name)
+                    raise ValueError(
+                        "FlashRT NVFP4 checkpoint is missing one of "
+                        f"{prefix}qweight_packed, {prefix}scale_factors, "
+                        f"{prefix}weight_global_scale."
+                    )
+
             zeros = None
             if (not cfg.symmetric) or _state_has_key(state_dict, container_key, full_name, "zeros"):
                 zeros = torch.empty((out_features, num_groups), dtype=torch.int16)
@@ -154,6 +200,9 @@ def prepare_model_for_weight_only_load(
                 scales=scales,
                 zeros=zeros,
                 input_scale=input_scale,
+                qweight_packed=qweight_packed,
+                scale_factors=scale_factors,
+                weight_global_scale=weight_global_scale,
                 bias=child.bias.detach() if child.bias is not None else None,
                 in_features=child.in_features,
                 out_features=child.out_features,

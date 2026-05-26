@@ -6,13 +6,18 @@ from typing import Mapping
 
 import torch
 
+from .backends.flashrt_nvfp4_ops import load_flashrt_nvfp4_ops
+
 
 @dataclass
 class QuantizedLinearWeight:
-    qweight: torch.Tensor
-    scales: torch.Tensor
+    qweight: torch.Tensor | None
+    scales: torch.Tensor | None
     zeros: torch.Tensor | None
     input_scale: torch.Tensor | None = None
+    qweight_packed: torch.Tensor | None = None
+    scale_factors: torch.Tensor | None = None
+    weight_global_scale: torch.Tensor | None = None
 
 
 def _effective_group_size(group_size: int, in_features: int) -> int:
@@ -156,9 +161,67 @@ def quantize_weight_awq(
     return QuantizedLinearWeight(qweight=qweight, scales=scales, zeros=zeros, input_scale=input_scale)
 
 
+def quantize_weight_nvfp4_rtn(weight: torch.Tensor) -> QuantizedLinearWeight:
+    if not weight.is_cuda:
+        raise ValueError("FlashRT NVFP4 quantization requires CUDA weights.")
+    if weight.shape[1] % 16 != 0:
+        raise ValueError(f"FlashRT NVFP4 requires in_features to be divisible by 16, got {weight.shape[1]}.")
+    ops = load_flashrt_nvfp4_ops(required=True)
+    qweight_packed, scale_factors, weight_global_scale = ops.quantize_weight_dynamic(
+        weight.detach().to(dtype=torch.bfloat16).contiguous()
+    )
+    return QuantizedLinearWeight(
+        qweight=None,
+        scales=None,
+        zeros=None,
+        qweight_packed=qweight_packed,
+        scale_factors=scale_factors,
+        weight_global_scale=weight_global_scale,
+    )
+
+
+def quantize_weight_nvfp4_awq(
+    weight: torch.Tensor,
+    act_stats,
+    alpha: float = 0.5,
+    eps: float = 1e-4,
+) -> QuantizedLinearWeight:
+    if not weight.is_cuda:
+        raise ValueError("FlashRT NVFP4 quantization requires CUDA weights.")
+    if weight.shape[1] % 16 != 0:
+        raise ValueError(f"FlashRT NVFP4 requires in_features to be divisible by 16, got {weight.shape[1]}.")
+    input_scale = _awq_input_scale(weight, act_stats, alpha=alpha, eps=eps)
+    scaled_weight = weight.detach().float() * input_scale.to(device=weight.device)[None, :]
+    ops = load_flashrt_nvfp4_ops(required=True)
+    qweight_packed, scale_factors, weight_global_scale = ops.quantize_weight_dynamic(
+        scaled_weight.to(dtype=torch.bfloat16).contiguous()
+    )
+    return QuantizedLinearWeight(
+        qweight=None,
+        scales=None,
+        zeros=None,
+        input_scale=input_scale,
+        qweight_packed=qweight_packed,
+        scale_factors=scale_factors,
+        weight_global_scale=weight_global_scale,
+    )
+
+
 def quantize_linear_weight(weight: torch.Tensor, cfg, act_stats=None) -> QuantizedLinearWeight:
     if hasattr(cfg, "validate"):
         cfg.validate()
+
+    if getattr(cfg, "quant_dtype", "int") == "nvfp4":
+        if cfg.algo == "rtn":
+            return quantize_weight_nvfp4_rtn(weight)
+        if cfg.algo == "awq":
+            return quantize_weight_nvfp4_awq(
+                weight,
+                act_stats=act_stats,
+                alpha=getattr(cfg, "awq_alpha", 0.5),
+                eps=getattr(cfg, "awq_scale_eps", 1e-4),
+            )
+        raise ValueError(f"Unknown quantization algo: {cfg.algo}")
 
     if cfg.algo == "rtn":
         qweight, scales, zeros = quantize_weight_rtn(

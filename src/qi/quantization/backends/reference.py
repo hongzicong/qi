@@ -21,6 +21,9 @@ class QuantBackend(Protocol):
         symmetric: bool,
         input_scale: torch.Tensor | None,
         keep_output_dtype: str,
+        qweight_packed: torch.Tensor | None = None,
+        scale_factors: torch.Tensor | None = None,
+        weight_global_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         ...
 
@@ -50,6 +53,9 @@ class ReferenceBackend:
         symmetric: bool,
         input_scale: torch.Tensor | None,
         keep_output_dtype: str,
+        qweight_packed: torch.Tensor | None = None,
+        scale_factors: torch.Tensor | None = None,
+        weight_global_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         out_dtype = _output_dtype(x, keep_output_dtype)
         compute_dtype = torch.float32 if x.dtype == torch.float32 else out_dtype

@@ -38,7 +38,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mixed-precision", choices=["no", "fp16", "bf16"], default="bf16")
 
     parser.add_argument("--quant-algo", choices=["rtn", "awq"], default="rtn")
-    parser.add_argument("--quant-backend", choices=["reference", "flashrt", "cuda_ext"], default="reference")
+    parser.add_argument("--quant-dtype", choices=["int", "nvfp4"], default="int")
+    parser.add_argument(
+        "--quant-backend",
+        choices=["reference", "flashrt", "cuda_ext", "flashrt_nvfp4"],
+        default="reference",
+    )
     parser.add_argument("--quant-bits", type=int, default=8)
     parser.add_argument("--quant-group-size", type=int, default=128)
     parser.add_argument("--quant-asymmetric", action="store_true")
@@ -62,6 +67,7 @@ def build_quant_config(args: argparse.Namespace) -> WeightOnlyQuantConfig:
     return WeightOnlyQuantConfig(
         enabled=True,
         algo=args.quant_algo,
+        quant_dtype=args.quant_dtype,
         bits=args.quant_bits,
         group_size=args.quant_group_size,
         symmetric=not args.quant_asymmetric,
@@ -95,8 +101,9 @@ def main() -> None:
         act_stats = torch.load(args.awq_stats, map_location="cpu")
 
     logger.info(
-        "Quantizing checkpoint: algo=%s bits=%s backend=%s target_expert=%s.",
+        "Quantizing checkpoint: algo=%s quant_dtype=%s bits=%s backend=%s target_expert=%s.",
         quant_cfg.algo,
+        quant_cfg.quant_dtype,
         quant_cfg.bits,
         quant_cfg.backend,
         quant_cfg.target_expert,
