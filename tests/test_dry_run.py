@@ -21,7 +21,6 @@ from typing import Any
 import numpy as np
 import torch
 from hydra.utils import instantiate
-from omegaconf import DictConfig
 from PIL import Image
 
 from qi.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
@@ -30,7 +29,7 @@ from qi.utils.config_resolvers import register_default_resolvers
 from qi.utils.image_utils import load_rgb_image, load_state_vector, pil_frame_to_input_image, preprocess_real_images, save_image
 from qi.utils.logging_config import get_logger, setup_logging
 from qi.utils.video_utils import save_mp4
-from qi.api import load_model, load_config
+from qi.api import load_model
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -98,14 +97,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def default_num_video_frames(cfg: DictConfig) -> int:
-    num_frames = int(cfg.data.train.num_frames)
-    ratio = int(cfg.data.train.get("action_video_freq_ratio", 1))
+def default_num_video_frames(model: Any) -> int:
+    num_frames = int(model.cfg.data.train.num_frames)
+    ratio = int(model.cfg.data.train.get("action_video_freq_ratio", 1))
     return ((num_frames - 1) // ratio) + 1
 
 
-def default_action_horizon(cfg: DictConfig) -> int:
-    return int(cfg.data.train.num_frames) - 1
+def default_action_horizon(model: Any) -> int:
+    return int(model.cfg.data.train.num_frames) - 1
 
 
 def save_actions(
@@ -186,15 +185,33 @@ def normalize_proprio(processor: Any, state: np.ndarray) -> torch.Tensor:
     return batch["state"]["default"].squeeze(0)
 
 
-def build_processor(cfg: DictConfig, dataset_stats_path: str | Path) -> Any:
-    processor = instantiate(cfg.data.train.processor)
+def build_processor(model: Any, dataset_stats_path: str | Path) -> Any:
+    processor = instantiate(model.cfg.data.train.processor)
     stats = load_dataset_stats_from_json(dataset_stats_path)
     processor.set_normalizer_from_stats(stats)
     processor.eval()
     return processor
 
 
-def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, output_dir: Path, prefix: str) -> None:
+def dry_run() -> None:
+    args = parse_args()
+    setup_logging(log_level=logging.INFO)
+
+    model = load_model(
+        ckpt=args.ckpt,
+        device=args.device,
+        mixed_precision=args.mixed_precision,
+        config_dir=args.config_dir,
+        task=args.task,
+        dataset_stats=args.dataset_stats,
+        torch_compile=args.torch_compile,
+        no_cuda_graph=args.no_cuda_graph,
+    )
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    prefix = args.prefix or "snapshot"
+
     missing = [
         name
         for name, value in {
@@ -208,7 +225,7 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
     if missing:
         raise ValueError("File source requires: " + ", ".join(missing))
 
-    processor = build_processor(cfg, args.dataset_stats)
+    processor = build_processor(model, args.dataset_stats)
     input_image = preprocess_real_images(
         cam_high=load_rgb_image(args.cam_high),
         cam_left_wrist=load_rgb_image(args.cam_left_wrist),
@@ -217,8 +234,8 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
         dtype=model.torch_dtype,
     )
     proprio = normalize_proprio(processor, load_state_vector(args.state_json))
-    num_video_frames = default_num_video_frames(cfg)
-    action_horizon = default_action_horizon(cfg)
+    num_video_frames = default_num_video_frames(model)
+    action_horizon = default_action_horizon(model)
     num_chunks = int(args.num_chunks)
     if num_chunks < 1:
         raise ValueError(f"--num-chunks must be >= 1, got {num_chunks}")
@@ -321,30 +338,5 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
     logger.info("Saved file dry-run outputs to %s.", output_dir)
 
 
-def run() -> None:
-    args = parse_args()
-    setup_logging(log_level=logging.INFO)
-    cfg = load_config(args)
-    model = load_model(args, cfg)
-
-    if args.torch_compile:
-        import logging as _logging
-        _logging.getLogger("torch._dynamo").setLevel(_logging.WARNING)
-        logger.info("torch.compile enabled on MoT body forward (Inductor, default mode)")
-
-    if not args.no_cuda_graph or args.torch_compile:
-        model._setup_graph_mgr(torch_compile=args.torch_compile)
-        if not args.no_cuda_graph:
-            logger.info("CUDA Graph enabled (wraps MoT body only)")
-        else:
-            logger.info("CUDA Graph disabled, torch.compile only")
-
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    prefix = args.prefix or "snapshot"
-
-    run_file_source(args, cfg, model, output_dir, prefix)
-
-
 if __name__ == "__main__":
-    run()
+    dry_run()

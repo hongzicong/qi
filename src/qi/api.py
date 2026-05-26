@@ -2,7 +2,7 @@
 from typing import Any
 from pathlib import Path
 
-import argparse
+import logging
 import torch
 from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
@@ -23,27 +23,53 @@ def dtype_from_mixed_precision(mixed_precision: str) -> torch.dtype:
     raise ValueError(f"Unsupported mixed precision: {mixed_precision}")
 
 
-def load_config(args: argparse.Namespace) -> DictConfig:
-    config_dir = str(Path(args.config_dir).resolve())
-    overrides = [f"task={args.task}", f"mixed_precision={args.mixed_precision}"]
+def load_config(
+        config_dir: str, 
+        task: str, 
+        mixed_precision: str, 
+        dataset_stats: str) -> DictConfig:
+    config_dir = str(Path(config_dir).resolve())
+    overrides = [f"task={task}", f"mixed_precision={mixed_precision}"]
     with initialize_config_dir(config_dir=config_dir, version_base="1.3"):
         cfg = compose(config_name="train", overrides=overrides)
 
     cfg.model.load_text_encoder = True
 
-    # Make validation/test dataset construction use the exact stats requested
-    # by this dry-run instead of recomputing or using a stale saved config path.
+    # Pin dataset splits to the provided stats path instead of the one saved in the config.
     if "data" in cfg:
         for split in ("train", "val"):
             if split in cfg.data:
-                cfg.data[split].pretrained_norm_stats = args.dataset_stats
+                cfg.data[split].pretrained_norm_stats = dataset_stats
     return cfg
 
 
-def load_model(args: argparse.Namespace, cfg: DictConfig) -> Any:
-    model_dtype = dtype_from_mixed_precision(args.mixed_precision)
-    model = instantiate(cfg.model, model_dtype=model_dtype, device=args.device)
-    payload = model.load_checkpoint(args.ckpt)
+def load_model(
+        ckpt: str,
+        device: str,
+        mixed_precision: str,
+        config_dir: str,
+        task: str,
+        dataset_stats: str,
+        torch_compile: bool = True,
+        no_cuda_graph: bool = False,
+) -> Any:
+    cfg = load_config(config_dir, task, mixed_precision, dataset_stats)
+    model_dtype = dtype_from_mixed_precision(mixed_precision)
+    model = instantiate(cfg.model, model_dtype=model_dtype, device=device)
+    model.cfg = cfg
+    payload = model.load_checkpoint(ckpt)
     model.eval()
-    logger.info("Loaded checkpoint %s with keys %s.", args.ckpt, sorted(payload.keys()))
+    logger.info("Loaded checkpoint %s with keys %s.", ckpt, sorted(payload.keys()))
+
+    if torch_compile:
+        logging.getLogger("torch._dynamo").setLevel(logging.WARNING)
+        logger.info("torch.compile enabled on MoT body forward (Inductor, default mode)")
+
+    if not no_cuda_graph or torch_compile:
+        model._setup_graph_mgr(torch_compile=torch_compile)
+        if not no_cuda_graph:
+            logger.info("CUDA Graph enabled (wraps MoT body only)")
+        else:
+            logger.info("CUDA Graph disabled, torch.compile only")
+
     return model
