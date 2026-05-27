@@ -48,6 +48,20 @@ Unlike general-purpose inference runtimes, Qi is designed around the unique dema
 
 ## Performance
 
+### Per-action chunk latency on NVIDIA H20
+
+| Metric (ms) | Baseline | +DiT Cache | +CUDA Graph | +`torch.compile` |
+|-------------|----------|------------|-------------|------------------|
+| Mean        | 328      | 220        | 96         | 77               |
+| P50         | 328      | 218        | 95         | 77               |
+| P99         | 334      | 230        | 103         | 81              |
+| Max         | 334      | 231        | 104         | 81              |
+
+| Speedup             | +DiT Cache | +CUDA Graph | +`torch.compile` |
+|---------------------|------------|-------------|------------------|
+| Mean                | 1.49×      | 3.42×       | 4.26×            |
+| P99                 | 1.45×      | 3.24×       | 4.12×            |
+
 ### Per-action chunk latency on NVIDIA A100
 
 | Metric (ms) | Baseline | +DiT Cache | +CUDA Graph | +`torch.compile` |
