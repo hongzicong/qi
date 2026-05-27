@@ -227,49 +227,6 @@ class Wan22Core(torch.nn.Module):
             "action": action,
         }
 
-    def training_loss(self, sample, tiled=False):
-        inputs = self.build_inputs(sample, tiled=tiled)
-        input_latents = inputs["input_latents"]
-        batch_size = input_latents.shape[0]
-        action = inputs["action"]
-        context = inputs["context"]
-        context_mask = inputs["context_mask"]
-
-        # 1. Continuous timestep sampling and noise injection.
-        noise = torch.randn_like(input_latents)
-        timestep = self.train_scheduler.sample_training_t(
-            batch_size=batch_size,
-            device=self.device,
-            dtype=input_latents.dtype,
-        )
-        latents = self.train_scheduler.add_noise(input_latents, noise, timestep)
-        target = self.train_scheduler.training_target(input_latents, noise, timestep)
-
-        # 2. fix first latent
-        if inputs["first_frame_latents"] is not None:
-            latents[:, :, 0: 1] = inputs["first_frame_latents"]
-
-        pred = self._model_fn(
-            latents=latents, # [B, C, Latent_T, H', W']
-            timestep=timestep,
-            context=context,
-            context_mask=context_mask,
-            action=action,
-            fuse_vae_embedding_in_latents=inputs["fuse_vae_embedding_in_latents"],
-        )
-        if inputs["first_frame_latents"] is not None:
-            pred = pred[:, :, 1:]
-            target = target[:, :, 1:]
-        loss_per_sample = F.mse_loss(pred.float(), target.float(), reduction="none").mean(dim=(1, 2, 3, 4))
-        sample_weight = self.train_scheduler.training_weight(timestep).to(
-            loss_per_sample.device, dtype=loss_per_sample.dtype
-        )
-        loss_total = (loss_per_sample * sample_weight).mean()
-        loss_dict = {
-            "loss_video": float(loss_total.detach().item()),
-        }
-        return loss_total, loss_dict
-
     @torch.inference_mode()
     def infer(
         self,
@@ -383,16 +340,6 @@ class Wan22Core(torch.nn.Module):
             latents[:, :, 0:1] = first_frame_latents
 
         return {"video": self._decode_latents(latents, tiled=tiled)}
-
-    def save_checkpoint(self, path, optimizer=None, step=None):
-        payload = {
-            "dit": self.dit.state_dict(),
-            "step": step,
-            "torch_dtype": str(self.torch_dtype),
-        }
-        if optimizer is not None:
-            payload["optimizer"] = optimizer.state_dict()
-        torch.save(payload, path)
 
     def load_checkpoint(self, path, optimizer=None):
         payload = torch.load(path, map_location="cpu")
