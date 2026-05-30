@@ -159,6 +159,8 @@ class WorldActionRobotWinPolicy:
         expert_cache_reuse_steps: int,
         expert_cache_warmup_steps: int,
         expert_cache_cooldown_steps: int,
+        cuda_graph: bool,
+        torch_compile: bool,
     ) -> None:
         model_cfg_copy = OmegaConf.create(OmegaConf.to_container(model_cfg, resolve=True))
         model_cfg_copy.load_text_encoder = True
@@ -166,6 +168,8 @@ class WorldActionRobotWinPolicy:
         self.model = instantiate(model_cfg_copy, model_dtype=model_dtype, device=device)
         self.model.load_checkpoint(checkpoint_path)
         self.model = self.model.to(device).eval()
+        if cuda_graph or torch_compile:
+            self.model._setup_graph_mgr(torch_compile=torch_compile)
 
         self.processor: FastWAMProcessor = instantiate(processor_cfg).eval()
         dataset_stats = load_dataset_stats_from_json(str(dataset_stats_path))
@@ -186,6 +190,8 @@ class WorldActionRobotWinPolicy:
         self.expert_cache_reuse_steps = int(expert_cache_reuse_steps)
         self.expert_cache_warmup_steps = int(expert_cache_warmup_steps)
         self.expert_cache_cooldown_steps = int(expert_cache_cooldown_steps)
+        self.cuda_graph = bool(cuda_graph)
+        self.torch_compile = bool(torch_compile)
 
         self.pending_actions: deque[np.ndarray] = deque()
         self.episode_count = 0
@@ -272,6 +278,8 @@ class WorldActionRobotWinPolicy:
                     "expert_cache_cooldown_steps": self.expert_cache_cooldown_steps,
                 }
             )
+        if "cuda_graph" in infer_params:
+            infer_kwargs["cuda_graph"] = self.cuda_graph
         infer_t0 = time.perf_counter() if self.timing_enabled else 0.0
         with torch.no_grad():
             pred = self.model.infer_action(**infer_kwargs)
@@ -398,6 +406,12 @@ def get_model(usr_args: Dict[str, Any]):
     expert_cache_cooldown_steps = int(
         usr_args.get("expert_cache_cooldown_steps", cfg.EVALUATION.get("expert_cache_cooldown_steps", 1))
     )
+    cuda_graph = _parse_bool(
+        usr_args.get("cuda_graph", cfg.EVALUATION.get("cuda_graph", False))
+    )
+    torch_compile = _parse_bool(
+        usr_args.get("torch_compile", cfg.EVALUATION.get("torch_compile", False))
+    )
 
     policy = WorldActionRobotWinPolicy(
         model_cfg=cfg.model,
@@ -421,6 +435,8 @@ def get_model(usr_args: Dict[str, Any]):
         expert_cache_reuse_steps=expert_cache_reuse_steps,
         expert_cache_warmup_steps=expert_cache_warmup_steps,
         expert_cache_cooldown_steps=expert_cache_cooldown_steps,
+        cuda_graph=cuda_graph,
+        torch_compile=torch_compile,
     )
     return policy
 

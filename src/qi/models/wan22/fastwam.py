@@ -254,8 +254,9 @@ class FastWAM(torch.nn.Module):
         self.loss_lambda_video = float(loss_lambda_video)
         self.loss_lambda_action = float(loss_lambda_action)
         
-        # CUDA Graph manager (wraps MoT body only)
+        # Optional accelerated MoT body paths.
         self._graph_mgr: Optional[CUDAGraphManager] = None
+        self._action_body_fn: Optional[Any] = None
 
         self.to(self.device)
 
@@ -643,7 +644,7 @@ class FastWAM(torch.nn.Module):
             if decision.should_reuse:
                 return expert_cache_state.reuse(body_input)
 
-        body_output = self.mot.forward_action_with_video_cache(
+        body_output = self._call_action_body_with_video_cache(
             action_tokens=body_input,
             action_freqs=action_pre["freqs"],
             action_t_mod=action_pre["t_mod"],
@@ -658,6 +659,10 @@ class FastWAM(torch.nn.Module):
         if expert_cache_state is not None:
             expert_cache_state.update(body_input, body_output)
         return body_output
+
+    def _call_action_body_with_video_cache(self, **kwargs) -> torch.Tensor:
+        body_fn = self._action_body_fn or self.mot.forward_action_with_video_cache
+        return body_fn(**kwargs)
 
     def _compute_video_loss_per_sample(
         self,
@@ -1089,13 +1094,16 @@ class FastWAM(torch.nn.Module):
     def _setup_graph_mgr(self, torch_compile: bool = False) -> None:
         """Create (or recreate) the CUDA Graph manager.
 
-        Must be called after the model is on GPU.  If *torch_compile* is True
-        the body function is wrapped with ``torch.compile`` before being handed
-        to the manager.
+        Must be called after the model is on GPU. If *torch_compile* is True,
+        the body function is wrapped with ``torch.compile`` for both eager
+        inference and optional CUDA Graph capture.
         """
         body_fn = self.mot.forward_action_with_video_cache
         if torch_compile:
             body_fn = torch.compile(body_fn)
+            self._action_body_fn = body_fn
+        else:
+            self._action_body_fn = None
         self._graph_mgr = CUDAGraphManager(body_fn)
 
     @torch.inference_mode()
@@ -1280,7 +1288,7 @@ class FastWAM(torch.nn.Module):
                 body_output = self._graph_mgr.replay(action_pre=action_pre)
             else:
                 # Normal / warmup path
-                body_output = self.mot.forward_action_with_video_cache(
+                body_output = self._call_action_body_with_video_cache(
                     action_tokens=body_input,
                     action_freqs=action_pre["freqs"],
                     action_t_mod=action_pre["t_mod"],

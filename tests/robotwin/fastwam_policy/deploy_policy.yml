@@ -27,4 +27,6 @@ expert_cache: false
 expert_cache_reuse_steps: 1
 expert_cache_warmup_steps: 1
 expert_cache_cooldown_steps: 1
+cuda_graph: false
+torch_compile: false
 skip_get_obs_within_replan: false

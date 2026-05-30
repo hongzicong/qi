@@ -108,6 +108,74 @@ A successful smoke test prints:
 Task 0 completed: 1/1 successes
 ```
 
+## Accelerated Evaluation
+
+The acceleration overrides below can be used with both
+`tests/libero/eval_libero_single.py` and `tests/libero/run_libero_manager.py`.
+They do not change the required LIBERO weights: the released LIBERO checkpoint
+still uses `skip_dit_load_from_pretrain=true` and does not require
+`ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt`.
+
+### Baseline
+
+```bash
+python tests/libero/eval_libero_single.py \
+  task=libero_uncond_2cam224_1e-4 \
+  ckpt=/path/to/libero_uncond_2cam224.pt \
+  EVALUATION.dataset_stats_path=/path/to/libero_uncond_2cam224_dataset_stats.json \
+  EVALUATION.task_suite_name=libero_spatial \
+  EVALUATION.task_id=0 \
+  EVALUATION.num_trials=1 \
+  EVALUATION.expert_cache=false \
+  EVALUATION.cuda_graph=false \
+  EVALUATION.torch_compile=false
+```
+
+### + DiT Caching
+
+```bash
+python tests/libero/eval_libero_single.py \
+  task=libero_uncond_2cam224_1e-4 \
+  ckpt=/path/to/libero_uncond_2cam224.pt \
+  EVALUATION.dataset_stats_path=/path/to/libero_uncond_2cam224_dataset_stats.json \
+  EVALUATION.task_suite_name=libero_spatial \
+  EVALUATION.task_id=0 \
+  EVALUATION.num_trials=1 \
+  EVALUATION.expert_cache=true \
+  EVALUATION.cuda_graph=false \
+  EVALUATION.torch_compile=false
+```
+
+### + DiT Caching + CUDA Graph
+
+```bash
+python tests/libero/eval_libero_single.py \
+  task=libero_uncond_2cam224_1e-4 \
+  ckpt=/path/to/libero_uncond_2cam224.pt \
+  EVALUATION.dataset_stats_path=/path/to/libero_uncond_2cam224_dataset_stats.json \
+  EVALUATION.task_suite_name=libero_spatial \
+  EVALUATION.task_id=0 \
+  EVALUATION.num_trials=1 \
+  EVALUATION.expert_cache=true \
+  EVALUATION.cuda_graph=true \
+  EVALUATION.torch_compile=false
+```
+
+### + DiT Caching + CUDA Graph + torch.compile
+
+```bash
+python tests/libero/eval_libero_single.py \
+  task=libero_uncond_2cam224_1e-4 \
+  ckpt=/path/to/libero_uncond_2cam224.pt \
+  EVALUATION.dataset_stats_path=/path/to/libero_uncond_2cam224_dataset_stats.json \
+  EVALUATION.task_suite_name=libero_spatial \
+  EVALUATION.task_id=0 \
+  EVALUATION.num_trials=1 \
+  EVALUATION.expert_cache=true \
+  EVALUATION.cuda_graph=true \
+  EVALUATION.torch_compile=true
+```
+
 ## Full Manager Evaluation
 
 Run the manager to evaluate LIBERO task suites:
