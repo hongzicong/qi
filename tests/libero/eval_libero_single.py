@@ -390,6 +390,11 @@ def _predict_action_chunk(
         "seed": None if cfg.get("seed") is None else int(cfg.seed),
         "rand_device": str(cfg.EVALUATION.get("rand_device", "cpu")),
         "tiled": bool(cfg.EVALUATION.get("tiled", False)),
+        "expert_cache": bool(cfg.EVALUATION.get("expert_cache", False)),
+        "expert_cache_reuse_steps": int(cfg.EVALUATION.get("expert_cache_reuse_steps", 1)),
+        "expert_cache_warmup_steps": int(cfg.EVALUATION.get("expert_cache_warmup_steps", 1)),
+        "expert_cache_cooldown_steps": int(cfg.EVALUATION.get("expert_cache_cooldown_steps", 1)),
+        "cuda_graph": bool(cfg.EVALUATION.get("cuda_graph", False)),
     }
     visualize_future_video = bool(cfg.EVALUATION.get("visualize_future_video", False))
     predicted_future_frames = None
@@ -430,6 +435,17 @@ def _get_max_steps(task_suite_name: str) -> int:
     return suite_steps[task_suite_name]
 
 
+def _sync_cuda_if_needed(device: str) -> None:
+    if torch.cuda.is_available() and str(device).startswith("cuda"):
+        torch.cuda.synchronize()
+
+
+def _format_first_chunk_timing(chunk_timings: list[float]) -> str:
+    first = f"{chunk_timings[0]:.3f}s" if len(chunk_timings) >= 1 else "N/A"
+    second = f"{chunk_timings[1]:.3f}s" if len(chunk_timings) >= 2 else "N/A"
+    return f"First action chunk time: {first}; second action chunk time: {second}"
+
+
 def run_single_episode(
     env,
     initial_state,
@@ -443,6 +459,7 @@ def run_single_episode(
     input_w: int,
     input_h: int,
     model_device: str,
+    chunk_timings: list[float],
 ) -> tuple[bool, list, list[dict[str, Any]], Optional[float]]:
     max_steps = _get_max_steps(cfg.EVALUATION.task_suite_name)
     replan_steps = int(cfg.EVALUATION.get("replan_steps", 5))
@@ -476,6 +493,8 @@ def run_single_episode(
             continue
 
         if len(pending_actions) == 0:
+            _sync_cuda_if_needed(model_device)
+            chunk_t0 = time.perf_counter()
             action_chunk, imgs, predicted_future_frames = _predict_action_chunk(
                 obs=obs,
                 task_description=task_description,
@@ -487,6 +506,12 @@ def run_single_episode(
                 input_h=input_h,
                 model_device=model_device,
             )
+            _sync_cuda_if_needed(model_device)
+            chunk_elapsed = time.perf_counter() - chunk_t0
+            if len(chunk_timings) < 2:
+                chunk_timings.append(float(chunk_elapsed))
+                if len(chunk_timings) == 2:
+                    print(_format_first_chunk_timing(chunk_timings), flush=True)
             if predicted_future_frames is not None:
                 current_replan_idx += 1
                 current_predicted_future_clip = {
@@ -594,6 +619,7 @@ def run_single_task(
     if visualize_future_video:
         results["episode_future_video_psnr"] = []
         results["future_video_psnr_mean"] = None
+    chunk_timings: list[float] = []
 
     for trial_idx in range(int(cfg.EVALUATION.num_trials)):
         success, replay_images, predicted_future_video_clips, episode_mean_psnr = run_single_episode(
@@ -608,6 +634,7 @@ def run_single_task(
             input_w=input_w,
             input_h=input_h,
             model_device=model_device,
+            chunk_timings=chunk_timings,
         )
         if success:
             results["successes"] += 1
@@ -660,6 +687,8 @@ def run_single_task(
         valid_episode_psnr = [x for x in results["episode_future_video_psnr"] if x is not None]
         if len(valid_episode_psnr) > 0:
             results["future_video_psnr_mean"] = float(np.mean(valid_episode_psnr))
+    results["first_action_chunk_time_s"] = chunk_timings[0] if len(chunk_timings) >= 1 else None
+    results["second_action_chunk_time_s"] = chunk_timings[1] if len(chunk_timings) >= 2 else None
     return results
 
 
@@ -688,6 +717,10 @@ def eval_single_process(cfg: DictConfig):
     model = instantiate(cfg.model, model_dtype=model_dtype, device=model_device)
     _load_model_checkpoint(model, str(cfg.ckpt))
     model = model.to(model_device).eval()
+    cuda_graph = bool(cfg.EVALUATION.get("cuda_graph", False))
+    torch_compile = bool(cfg.EVALUATION.get("torch_compile", False))
+    if cuda_graph or torch_compile:
+        model._setup_graph_mgr(torch_compile=torch_compile)
 
     dataset_stats_path = _resolve_dataset_stats_path(cfg)
     dataset_stats = load_dataset_stats_from_json(str(dataset_stats_path))
@@ -768,6 +801,15 @@ def eval_single_process(cfg: DictConfig):
         f"Task {cfg.EVALUATION.task_id} completed: "
         f"{results['successes']}/{cfg.EVALUATION.num_trials} successes"
     )
+    chunk_timings = [
+        value
+        for value in (
+            results.get("first_action_chunk_time_s"),
+            results.get("second_action_chunk_time_s"),
+        )
+        if value is not None
+    ]
+    print(_format_first_chunk_timing(chunk_timings), flush=True)
     if results.get("future_video_psnr_mean") is not None:
         print(f"Task {cfg.EVALUATION.task_id} future-video PSNR mean: {results['future_video_psnr_mean']:.4f}")
     print(f"Time taken: {results['duration']:.2f} seconds")

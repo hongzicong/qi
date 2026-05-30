@@ -225,6 +225,8 @@ def main(cfg: DictConfig):
     _append_override(overrides, "expert_cache_reuse_steps", cfg.EVALUATION.get("expert_cache_reuse_steps", 1))
     _append_override(overrides, "expert_cache_warmup_steps", cfg.EVALUATION.get("expert_cache_warmup_steps", 1))
     _append_override(overrides, "expert_cache_cooldown_steps", cfg.EVALUATION.get("expert_cache_cooldown_steps", 1))
+    _append_override(overrides, "cuda_graph", cfg.EVALUATION.get("cuda_graph", False))
+    _append_override(overrides, "torch_compile", cfg.EVALUATION.get("torch_compile", False))
     _append_override(
         overrides,
         "skip_get_obs_within_replan",

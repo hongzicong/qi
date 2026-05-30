@@ -148,6 +148,64 @@ python tests/robotwin/run_robotwin_manager.py \
   MULTIRUN.max_tasks_per_gpu=1
 ```
 
+## Accelerated Evaluation
+
+RobotWin supports the same action-inference acceleration overrides as LIBERO.
+The flags work with both `eval_robotwin_single.py` and
+`run_robotwin_manager.py`.
+
+### Baseline
+
+```bash
+python tests/robotwin/eval_robotwin_single.py \
+  ckpt=/path/to/robotwin_uncond_3cam_384.pt \
+  EVALUATION.task_name=click_alarmclock \
+  EVALUATION.dataset_stats_path=/path/to/robotwin_uncond_3cam_384_dataset_stats.json \
+  EVALUATION.eval_num_episodes=1 \
+  EVALUATION.expert_cache=false \
+  EVALUATION.cuda_graph=false \
+  EVALUATION.torch_compile=false
+```
+
+### + DiT Caching
+
+```bash
+python tests/robotwin/eval_robotwin_single.py \
+  ckpt=/path/to/robotwin_uncond_3cam_384.pt \
+  EVALUATION.task_name=click_alarmclock \
+  EVALUATION.dataset_stats_path=/path/to/robotwin_uncond_3cam_384_dataset_stats.json \
+  EVALUATION.eval_num_episodes=1 \
+  EVALUATION.expert_cache=true \
+  EVALUATION.cuda_graph=false \
+  EVALUATION.torch_compile=false
+```
+
+### + DiT Caching + CUDA Graph
+
+```bash
+python tests/robotwin/eval_robotwin_single.py \
+  ckpt=/path/to/robotwin_uncond_3cam_384.pt \
+  EVALUATION.task_name=click_alarmclock \
+  EVALUATION.dataset_stats_path=/path/to/robotwin_uncond_3cam_384_dataset_stats.json \
+  EVALUATION.eval_num_episodes=1 \
+  EVALUATION.expert_cache=true \
+  EVALUATION.cuda_graph=true \
+  EVALUATION.torch_compile=false
+```
+
+### + DiT Caching + CUDA Graph + torch.compile
+
+```bash
+python tests/robotwin/eval_robotwin_single.py \
+  ckpt=/path/to/robotwin_uncond_3cam_384.pt \
+  EVALUATION.task_name=click_alarmclock \
+  EVALUATION.dataset_stats_path=/path/to/robotwin_uncond_3cam_384_dataset_stats.json \
+  EVALUATION.eval_num_episodes=1 \
+  EVALUATION.expert_cache=true \
+  EVALUATION.cuda_graph=true \
+  EVALUATION.torch_compile=true
+```
+
 ## Outputs
 
 Single-task workers write per-phase result files:
