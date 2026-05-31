@@ -9,6 +9,7 @@ from hydra.utils import instantiate
 
 from qi.api import dtype_from_mixed_precision, load_config
 from qi.quantization import (
+    WeightActivationQuantConfig,
     WeightOnlyQuantConfig,
     load_checkpoint_payload,
     quantize_loaded_model,
@@ -37,47 +38,83 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--mixed-precision", choices=["no", "fp16", "bf16"], default="bf16")
 
-    parser.add_argument("--quant-algo", choices=["rtn", "awq"], default="rtn")
-    parser.add_argument("--quant-dtype", choices=["int", "nvfp4"], default="int")
+    parser.add_argument("--quant-algo", choices=["rtn", "awq", "smoothquant"], default="rtn")
+    parser.add_argument("--quant-dtype", choices=["int", "fp8"], default="int")
     parser.add_argument(
         "--quant-backend",
-        choices=["reference", "cuda_ext", "flashrt_nvfp4"],
+        choices=["reference", "cuda_ext", "flashrt_fp8"],
         default="reference",
     )
     parser.add_argument("--quant-bits", type=int, default=8)
     parser.add_argument("--quant-group-size", type=int, default=128)
     parser.add_argument("--quant-asymmetric", action="store_true")
     parser.add_argument("--target-expert", choices=["all", "both", "action", "video"], default="all")
-    parser.add_argument("--target-modules", default="q_proj,k_proj,v_proj,o_proj,fc1,fc2")
+    parser.add_argument("--target-modules", default="self_attn.q,self_attn.k,self_attn.v,self_attn.o,cross_attn.q,cross_attn.k,cross_attn.v,cross_attn.o,ffn.0,ffn.2")
     parser.add_argument("--skip-modules", default="")
     parser.add_argument("--no-quantize-ffn", action="store_true")
     parser.add_argument("--no-quantize-attn-proj", action="store_true")
     parser.add_argument("--keep-output-dtype", choices=["input", "fp16", "bf16", "fp32"], default="input")
     parser.add_argument("--awq-alpha", type=float, default=0.5)
     parser.add_argument("--awq-scale-eps", type=float, default=1e-4)
+    parser.add_argument("--smoothquant-alpha", type=float, default=0.5)
+    parser.add_argument("--smoothquant-scale-eps", type=float, default=1e-4)
+    parser.add_argument("--activation-scale", type=float, default=1.0)
+    parser.add_argument("--activation-granularity", choices=["per_tensor", "per_token"], default=None)
+    parser.add_argument("--weight-granularity", choices=["per_tensor", "per_channel"], default=None)
     parser.add_argument(
         "--awq-stats",
         default=None,
-        help="Path to torch-saved AWQ activation stats. Required for --quant-algo awq.",
+        help="Path to torch-saved activation stats. Required for --quant-algo awq/smoothquant.",
     )
     return parser.parse_args()
 
 
-def build_quant_config(args: argparse.Namespace) -> WeightOnlyQuantConfig:
-    return WeightOnlyQuantConfig(
+def build_quant_config(args: argparse.Namespace) -> WeightOnlyQuantConfig | WeightActivationQuantConfig:
+    common = dict(
         enabled=True,
-        algo=args.quant_algo,
-        quant_dtype=args.quant_dtype,
-        bits=args.quant_bits,
-        group_size=args.quant_group_size,
-        symmetric=not args.quant_asymmetric,
-        backend=args.quant_backend,
         target_expert=args.target_expert,
         target_modules=_csv_tuple(args.target_modules),
         skip_modules=_csv_tuple(args.skip_modules),
         quantize_ffn=not args.no_quantize_ffn,
         quantize_attn_proj=not args.no_quantize_attn_proj,
         keep_output_dtype=args.keep_output_dtype,
+    )
+    if args.quant_dtype == "fp8":
+        backend = "flashrt_fp8" if args.quant_backend == "reference" else args.quant_backend
+        return WeightActivationQuantConfig(
+            **common,
+            algo=args.quant_algo,
+            quant_dtype="fp8",
+            bits=8,
+            activation_bits=8,
+            backend=backend,
+            activation_granularity=args.activation_granularity or "per_tensor",
+            weight_granularity=args.weight_granularity or "per_tensor",
+            smoothquant_alpha=args.smoothquant_alpha,
+            smoothquant_scale_eps=args.smoothquant_scale_eps,
+            activation_scale=args.activation_scale,
+        )
+    if args.quant_algo == "smoothquant" or args.activation_granularity is not None or args.weight_granularity is not None:
+        return WeightActivationQuantConfig(
+            **common,
+            algo=args.quant_algo,
+            quant_dtype="int",
+            bits=8,
+            activation_bits=8,
+            backend=args.quant_backend,
+            activation_granularity=args.activation_granularity or "per_token",
+            weight_granularity=args.weight_granularity or "per_channel",
+            smoothquant_alpha=args.smoothquant_alpha,
+            smoothquant_scale_eps=args.smoothquant_scale_eps,
+        )
+    return WeightOnlyQuantConfig(
+        **common,
+        algo=args.quant_algo,
+        quant_dtype=args.quant_dtype,
+        bits=args.quant_bits,
+        group_size=args.quant_group_size,
+        symmetric=not args.quant_asymmetric,
+        backend=args.quant_backend,
         awq_alpha=args.awq_alpha,
         awq_scale_eps=args.awq_scale_eps,
     )
@@ -95,9 +132,9 @@ def main() -> None:
     quant_cfg = build_quant_config(args)
     quant_cfg.validate()
     act_stats = None
-    if quant_cfg.algo == "awq":
+    if quant_cfg.algo in ("awq", "smoothquant"):
         if args.awq_stats is None:
-            raise ValueError("--awq-stats is required when --quant-algo awq.")
+            raise ValueError("--awq-stats is required when --quant-algo awq/smoothquant.")
         act_stats = torch.load(args.awq_stats, map_location="cpu")
 
     logger.info(

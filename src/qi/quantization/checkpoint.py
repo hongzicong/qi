@@ -7,15 +7,20 @@ from typing import Any, Mapping
 import torch
 import torch.nn as nn
 
-from .config import WeightOnlyQuantConfig
+from .config import WeightActivationQuantConfig, WeightOnlyQuantConfig
 from .swap import prepare_model_for_weight_only_load, replace_linear_with_weight_only
 
 METADATA_KEY = "qi_quantization"
 
 
-def quant_config_from_metadata(metadata: Mapping[str, Any]) -> WeightOnlyQuantConfig:
+def quant_config_from_metadata(metadata: Mapping[str, Any]) -> WeightOnlyQuantConfig | WeightActivationQuantConfig:
     cfg_payload = dict(metadata.get("config", metadata))
-    valid_keys = WeightOnlyQuantConfig.__dataclass_fields__.keys()
+    cfg_cls = (
+        WeightActivationQuantConfig
+        if metadata.get("format") == "qi.weight_activation.v1" or cfg_payload.get("quant_dtype") == "fp8"
+        else WeightOnlyQuantConfig
+    )
+    valid_keys = cfg_cls.__dataclass_fields__.keys()
     cfg_payload = {key: value for key, value in cfg_payload.items() if key in valid_keys}
     for key in (
         "action_expert_markers",
@@ -25,14 +30,14 @@ def quant_config_from_metadata(metadata: Mapping[str, Any]) -> WeightOnlyQuantCo
     ):
         if key in cfg_payload and isinstance(cfg_payload[key], list):
             cfg_payload[key] = tuple(cfg_payload[key])
-    return WeightOnlyQuantConfig(**cfg_payload)
+    return cfg_cls(**cfg_payload)
 
 
 def checkpoint_is_quantized(payload: Mapping[str, Any]) -> bool:
     return METADATA_KEY in payload
 
 
-def prepare_model_for_quantized_checkpoint(model: nn.Module, payload: Mapping[str, Any]) -> WeightOnlyQuantConfig:
+def prepare_model_for_quantized_checkpoint(model: nn.Module, payload: Mapping[str, Any]) -> WeightOnlyQuantConfig | WeightActivationQuantConfig:
     if not checkpoint_is_quantized(payload):
         raise ValueError("Checkpoint is missing quantization metadata.")
     cfg = quant_config_from_metadata(payload[METADATA_KEY])
@@ -56,7 +61,7 @@ def load_checkpoint_payload(path: str | Path) -> dict[str, Any]:
 
 def quantize_loaded_model(
     model: nn.Module,
-    cfg: WeightOnlyQuantConfig,
+    cfg: WeightOnlyQuantConfig | WeightActivationQuantConfig,
     act_stats: Mapping[str, object] | object | None = None,
 ) -> nn.Module:
     replace_linear_with_weight_only(model, cfg, act_stats=act_stats)
@@ -66,7 +71,7 @@ def quantize_loaded_model(
 def save_quantized_checkpoint(
     model,
     output_path: str | Path,
-    cfg: WeightOnlyQuantConfig,
+    cfg: WeightOnlyQuantConfig | WeightActivationQuantConfig,
     source_payload: Mapping[str, Any] | None = None,
     source_checkpoint: str | Path | None = None,
 ) -> None:
@@ -83,7 +88,7 @@ def save_quantized_checkpoint(
 
     payload.pop("optimizer", None)
     payload[METADATA_KEY] = {
-        "format": "qi.weight_only.v1",
+        "format": "qi.weight_activation.v1" if isinstance(cfg, WeightActivationQuantConfig) else "qi.weight_only.v1",
         "config": asdict(cfg),
         "source_checkpoint": None if source_checkpoint is None else str(source_checkpoint),
     }

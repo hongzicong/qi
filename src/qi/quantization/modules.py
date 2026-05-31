@@ -21,6 +21,11 @@ class WeightOnlyLinear(nn.Module):
         qweight_packed: torch.Tensor | None = None,
         scale_factors: torch.Tensor | None = None,
         weight_global_scale: torch.Tensor | None = None,
+        activation_scale: torch.Tensor | None = None,
+        weight_scale: torch.Tensor | None = None,
+        weight_fp8: torch.Tensor | None = None,
+        activation_granularity: str | None = None,
+        weight_granularity: str | None = None,
         keep_output_dtype: str = "input",
     ):
         super().__init__()
@@ -44,6 +49,18 @@ class WeightOnlyLinear(nn.Module):
             self.weight_global_scale = None
         else:
             self.register_buffer("weight_global_scale", weight_global_scale.contiguous().float())
+        if activation_scale is None:
+            self.activation_scale = None
+        else:
+            self.register_buffer("activation_scale", activation_scale.contiguous().float())
+        if weight_scale is None:
+            self.weight_scale = None
+        else:
+            self.register_buffer("weight_scale", weight_scale.contiguous().float())
+        if weight_fp8 is None:
+            self.weight_fp8 = None
+        else:
+            self.register_buffer("weight_fp8", weight_fp8.contiguous())
         if zeros is None:
             self.zeros = None
         else:
@@ -64,6 +81,8 @@ class WeightOnlyLinear(nn.Module):
         self.group_size = int(group_size)
         self.symmetric = bool(symmetric)
         self.backend = backend
+        self.activation_granularity = activation_granularity
+        self.weight_granularity = weight_granularity
         self.keep_output_dtype = keep_output_dtype
 
     @classmethod
@@ -76,13 +95,18 @@ class WeightOnlyLinear(nn.Module):
             qweight_packed=getattr(quantized, "qweight_packed", None),
             scale_factors=getattr(quantized, "scale_factors", None),
             weight_global_scale=getattr(quantized, "weight_global_scale", None),
+            activation_scale=getattr(quantized, "activation_scale", None),
+            weight_scale=getattr(quantized, "weight_scale", None),
+            weight_fp8=getattr(quantized, "weight_fp8", None),
             bias=linear.bias.detach() if linear.bias is not None else None,
             in_features=linear.in_features,
             out_features=linear.out_features,
             bits=cfg.bits,
-            group_size=cfg.group_size,
-            symmetric=cfg.symmetric,
+            group_size=int(getattr(cfg, "group_size", -1)),
+            symmetric=bool(getattr(cfg, "symmetric", True)),
             backend=backend,
+            activation_granularity=getattr(cfg, "activation_granularity", None),
+            weight_granularity=getattr(cfg, "weight_granularity", None),
             keep_output_dtype=getattr(cfg, "keep_output_dtype", "input"),
         )
 
@@ -100,5 +124,10 @@ class WeightOnlyLinear(nn.Module):
             qweight_packed=self.qweight_packed,
             scale_factors=self.scale_factors,
             weight_global_scale=self.weight_global_scale,
+            activation_scale=self.activation_scale,
+            weight_scale=self.weight_scale,
+            weight_fp8=self.weight_fp8,
+            activation_granularity=self.activation_granularity,
+            weight_granularity=self.weight_granularity,
             keep_output_dtype=self.keep_output_dtype,
         )

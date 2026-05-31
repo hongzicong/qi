@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .flashrt_nvfp4_ops import FlashRTNVFP4Backend
+from .flashrt_fp8_ops import FlashRTFP8Backend
 from .reference import CudaExtBackend, QuantBackend, ReferenceBackend
 
 
@@ -9,14 +9,14 @@ def get_backend(name: str) -> QuantBackend:
         return ReferenceBackend()
     if name == "cuda_ext":
         return CudaExtBackend()
-    if name == "flashrt_nvfp4":
-        return FlashRTNVFP4Backend()
+    if name == "flashrt_fp8":
+        return FlashRTFP8Backend()
     raise ValueError(f"Unknown quantization backend: {name}")
 
 
 __all__ = [
     "CudaExtBackend",
-    "FlashRTNVFP4Backend",
+    "FlashRTFP8Backend",
     "QuantBackend",
     "ReferenceBackend",
     "get_backend",

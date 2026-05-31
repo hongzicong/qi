@@ -24,6 +24,11 @@ class QuantBackend(Protocol):
         qweight_packed: torch.Tensor | None = None,
         scale_factors: torch.Tensor | None = None,
         weight_global_scale: torch.Tensor | None = None,
+        activation_scale: torch.Tensor | None = None,
+        weight_scale: torch.Tensor | None = None,
+        weight_fp8: torch.Tensor | None = None,
+        activation_granularity: str | None = None,
+        weight_granularity: str | None = None,
     ) -> torch.Tensor:
         ...
 
@@ -56,12 +61,23 @@ class ReferenceBackend:
         qweight_packed: torch.Tensor | None = None,
         scale_factors: torch.Tensor | None = None,
         weight_global_scale: torch.Tensor | None = None,
+        activation_scale: torch.Tensor | None = None,
+        weight_scale: torch.Tensor | None = None,
+        weight_fp8: torch.Tensor | None = None,
+        activation_granularity: str | None = None,
+        weight_granularity: str | None = None,
     ) -> torch.Tensor:
         out_dtype = _output_dtype(x, keep_output_dtype)
         compute_dtype = torch.float32 if x.dtype == torch.float32 else out_dtype
         x_compute = x.to(compute_dtype)
         if input_scale is not None:
             x_compute = x_compute / input_scale.to(device=x.device, dtype=compute_dtype)
+        if activation_granularity == "per_token":
+            if weight_granularity != "per_channel":
+                raise ValueError("per-token activation quantization requires per-channel weight quantization.")
+            qmax = 2 ** (bits - 1) - 1
+            token_scale = x_compute.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / qmax
+            x_compute = torch.round(x_compute / token_scale).clamp(-qmax, qmax) * token_scale
         weight = dequantize_weight(
             qweight=qweight,
             scales=scales,

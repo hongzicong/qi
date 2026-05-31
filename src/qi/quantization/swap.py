@@ -70,6 +70,12 @@ def _stats_for_module(act_stats, name: str):
         suffix_matches = [value for key, value in act_stats.items() if name.endswith(str(key))]
         if len(suffix_matches) == 1:
             return suffix_matches[0]
+        examples = ", ".join(str(key) for key in list(act_stats.keys())[:5])
+        raise ValueError(
+            f"Missing AWQ activation stats for module {name!r}. "
+            "Collect AWQ stats with the same --target-modules/--target-expert used for quantization. "
+            f"Available stats examples: {examples}"
+        )
     return act_stats
 
 
@@ -77,6 +83,7 @@ def _effective_group_size(group_size: int, in_features: int) -> int:
     if group_size <= 0 or group_size > in_features:
         return in_features
     return int(group_size)
+
 
 
 def _state_prefix(container_key: str | None, module_name: str) -> str:
@@ -160,7 +167,8 @@ def prepare_model_for_weight_only_load(
                 continue
 
             out_features, in_features = child.weight.shape
-            group_size = _effective_group_size(cfg.group_size, in_features)
+            cfg_group_size = int(getattr(cfg, "group_size", -1))
+            group_size = _effective_group_size(cfg_group_size, in_features)
             num_groups = math.ceil(in_features / group_size)
 
             qweight = torch.empty((out_features, in_features), dtype=torch.int8)
@@ -168,31 +176,33 @@ def prepare_model_for_weight_only_load(
             qweight_packed = None
             scale_factors = None
             weight_global_scale = None
-            if getattr(cfg, "quant_dtype", "int") == "nvfp4":
+            weight_fp8 = None
+            weight_scale = None
+            activation_scale = None
+            if getattr(cfg, "quant_dtype", "int") == "fp8":
                 qweight = None
                 scales = None
-                qweight_packed = _state_empty_like(state_dict, container_key, full_name, "qweight_packed")
-                scale_factors = _state_empty_like(state_dict, container_key, full_name, "scale_factors")
-                weight_global_scale = _state_empty_like(
-                    state_dict,
-                    container_key,
-                    full_name,
-                    "weight_global_scale",
-                )
-                if qweight_packed is None or scale_factors is None or weight_global_scale is None:
-                    prefix = _state_prefix(container_key, full_name)
-                    raise ValueError(
-                        "FlashRT NVFP4 checkpoint is missing one of "
-                        f"{prefix}qweight_packed, {prefix}scale_factors, "
-                        f"{prefix}weight_global_scale."
-                    )
-
+                weight_fp8 = _state_empty_like(state_dict, container_key, full_name, "weight_fp8")
+                weight_scale = _state_empty_like(state_dict, container_key, full_name, "weight_scale")
+                activation_scale = _state_empty_like(state_dict, container_key, full_name, "activation_scale")
+                if weight_fp8 is None:
+                    weight_fp8 = _state_empty_like(state_dict, container_key, full_name, "qweight_packed")
+                if weight_scale is None:
+                    weight_scale = _state_empty_like(state_dict, container_key, full_name, "weight_global_scale")
+                if activation_scale is None:
+                    activation_scale = _state_empty_like(state_dict, container_key, full_name, "scale_factors")
+                if weight_fp8 is None:
+                    weight_fp8 = torch.empty((in_features, out_features), dtype=torch.uint8)
+                if weight_scale is None:
+                    weight_scale = torch.empty((1,), dtype=torch.float32)
+                if activation_scale is None:
+                    activation_scale = torch.empty((1,), dtype=torch.float32)
             zeros = None
-            if (not cfg.symmetric) or _state_has_key(state_dict, container_key, full_name, "zeros"):
+            if (not getattr(cfg, "symmetric", True)) or _state_has_key(state_dict, container_key, full_name, "zeros"):
                 zeros = torch.empty((out_features, num_groups), dtype=torch.int16)
 
             input_scale = None
-            if cfg.algo == "awq" or _state_has_key(state_dict, container_key, full_name, "input_scale"):
+            if cfg.algo in ("awq", "smoothquant") or _state_has_key(state_dict, container_key, full_name, "input_scale"):
                 input_scale = torch.empty((in_features,), dtype=torch.float32)
 
             qlinear = WeightOnlyLinear(
@@ -203,13 +213,18 @@ def prepare_model_for_weight_only_load(
                 qweight_packed=qweight_packed,
                 scale_factors=scale_factors,
                 weight_global_scale=weight_global_scale,
+                activation_scale=activation_scale,
+                weight_scale=weight_scale,
+                weight_fp8=weight_fp8,
                 bias=child.bias.detach() if child.bias is not None else None,
                 in_features=child.in_features,
                 out_features=child.out_features,
                 bits=cfg.bits,
-                group_size=cfg.group_size,
-                symmetric=cfg.symmetric,
+                group_size=int(getattr(cfg, "group_size", -1)),
+                symmetric=bool(getattr(cfg, "symmetric", True)),
                 backend=backend,
+                activation_granularity=getattr(cfg, "activation_granularity", None),
+                weight_granularity=getattr(cfg, "weight_granularity", None),
                 keep_output_dtype=getattr(cfg, "keep_output_dtype", "input"),
             )
             qlinear.train(child.training)

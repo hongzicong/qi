@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quant-group-size", type=int, default=128)
     parser.add_argument("--quant-asymmetric", action="store_true")
     parser.add_argument("--target-expert", choices=["all", "both", "action", "video"], default="all")
-    parser.add_argument("--target-modules", default="q_proj,k_proj,v_proj,o_proj,fc1,fc2")
+    parser.add_argument("--target-modules", default="self_attn.q,self_attn.k,self_attn.v,self_attn.o,cross_attn.q,cross_attn.k,cross_attn.v,cross_attn.o,ffn.0,ffn.2")
     parser.add_argument("--skip-modules", default="")
     parser.add_argument("--no-quantize-ffn", action="store_true")
     parser.add_argument("--no-quantize-attn-proj", action="store_true")

@@ -6,7 +6,7 @@ from typing import Mapping
 
 import torch
 
-from .backends.flashrt_nvfp4_ops import load_flashrt_nvfp4_ops
+from .backends.flashrt_fp8_ops import load_flashrt_fp8_ops, quantize_to_fp8_e4m3
 
 
 @dataclass
@@ -18,6 +18,9 @@ class QuantizedLinearWeight:
     qweight_packed: torch.Tensor | None = None
     scale_factors: torch.Tensor | None = None
     weight_global_scale: torch.Tensor | None = None
+    weight_fp8: torch.Tensor | None = None
+    weight_scale: torch.Tensor | None = None
+    activation_scale: torch.Tensor | None = None
 
 
 def _effective_group_size(group_size: int, in_features: int) -> int:
@@ -118,18 +121,38 @@ def dequantize_weight(
 
 def _resolve_act_stats(act_stats, in_features: int, device: torch.device) -> torch.Tensor:
     if act_stats is None:
-        raise ValueError("AWQ quantization requires calibration activation statistics.")
+        raise ValueError("Activation-aware quantization requires calibration activation statistics.")
     if isinstance(act_stats, Mapping):
-        if "abs_mean" in act_stats:
-            act_stats = act_stats["abs_mean"]
-        elif "mean_abs" in act_stats:
-            act_stats = act_stats["mean_abs"]
+        for key in ("abs_mean", "mean_abs", "abs_max", "amax", "max_abs"):
+            if key in act_stats:
+                act_stats = act_stats[key]
+                break
         else:
-            raise ValueError("AWQ act_stats mapping must contain `abs_mean` or `mean_abs`.")
+            raise ValueError(
+                "act_stats mapping must contain one of abs_mean, mean_abs, abs_max, amax, or max_abs."
+            )
     act = torch.as_tensor(act_stats, dtype=torch.float32, device=device).flatten()
     if act.numel() != in_features:
-        raise ValueError(f"Expected AWQ act_stats with {in_features} values, got {act.numel()}.")
+        raise ValueError(f"Expected activation stats with {in_features} values, got {act.numel()}.")
     return act
+
+
+def _activation_scale_from_stats(act_stats, device: torch.device, fallback: float = 1.0) -> torch.Tensor:
+    if act_stats is None:
+        scale = float(fallback)
+    elif isinstance(act_stats, Mapping):
+        source = None
+        for key in ("global_abs_max", "abs_max", "amax", "max_abs", "abs_mean", "mean_abs"):
+            if key in act_stats:
+                source = act_stats[key]
+                break
+        if source is None:
+            scale = float(fallback)
+        else:
+            scale = float(torch.as_tensor(source, dtype=torch.float32).abs().max().item()) / 448.0
+    else:
+        scale = float(torch.as_tensor(act_stats, dtype=torch.float32).abs().max().item()) / 448.0
+    return torch.tensor([max(scale, 1e-12)], dtype=torch.float32, device=device)
 
 
 def _awq_input_scale(weight: torch.Tensor, act_stats, alpha: float, eps: float) -> torch.Tensor:
@@ -161,67 +184,84 @@ def quantize_weight_awq(
     return QuantizedLinearWeight(qweight=qweight, scales=scales, zeros=zeros, input_scale=input_scale)
 
 
-def quantize_weight_nvfp4_rtn(weight: torch.Tensor) -> QuantizedLinearWeight:
-    if not weight.is_cuda:
-        raise ValueError("FlashRT NVFP4 quantization requires CUDA weights.")
-    if weight.shape[1] % 16 != 0:
-        raise ValueError(f"FlashRT NVFP4 requires in_features to be divisible by 16, got {weight.shape[1]}.")
-    ops = load_flashrt_nvfp4_ops(required=True)
-    qweight_packed, scale_factors, weight_global_scale = ops.quantize_weight_dynamic(
-        weight.detach().to(dtype=torch.bfloat16).contiguous()
-    )
-    return QuantizedLinearWeight(
-        qweight=None,
-        scales=None,
-        zeros=None,
-        qweight_packed=qweight_packed,
-        scale_factors=scale_factors,
-        weight_global_scale=weight_global_scale,
-    )
-
-
-def quantize_weight_nvfp4_awq(
+def quantize_weight_int8_smoothquant(
     weight: torch.Tensor,
     act_stats,
     alpha: float = 0.5,
     eps: float = 1e-4,
 ) -> QuantizedLinearWeight:
-    if not weight.is_cuda:
-        raise ValueError("FlashRT NVFP4 quantization requires CUDA weights.")
-    if weight.shape[1] % 16 != 0:
-        raise ValueError(f"FlashRT NVFP4 requires in_features to be divisible by 16, got {weight.shape[1]}.")
     input_scale = _awq_input_scale(weight, act_stats, alpha=alpha, eps=eps)
     scaled_weight = weight.detach().float() * input_scale.to(device=weight.device)[None, :]
-    ops = load_flashrt_nvfp4_ops(required=True)
-    qweight_packed, scale_factors, weight_global_scale = ops.quantize_weight_dynamic(
-        scaled_weight.to(dtype=torch.bfloat16).contiguous()
+    qweight, scales, zeros = quantize_weight_rtn(
+        scaled_weight, bits=8, group_size=-1, symmetric=True
     )
+    return QuantizedLinearWeight(qweight=qweight, scales=scales, zeros=zeros, input_scale=input_scale)
+
+
+def quantize_weight_fp8_rtn(weight: torch.Tensor, activation_scale: float = 1.0) -> QuantizedLinearWeight:
+    ops = load_flashrt_fp8_ops(required=False)
+    if ops is not None and weight.is_cuda:
+        weight_fp8, weight_scale = ops.quantize_weight(weight.detach())
+    else:
+        weight_fp8, weight_scale = quantize_to_fp8_e4m3(weight.detach().t().contiguous())
+    act_scale = torch.tensor([float(activation_scale)], dtype=torch.float32, device=weight.device).clamp(min=1e-12)
     return QuantizedLinearWeight(
         qweight=None,
         scales=None,
         zeros=None,
-        input_scale=input_scale,
-        qweight_packed=qweight_packed,
-        scale_factors=scale_factors,
-        weight_global_scale=weight_global_scale,
+        weight_fp8=weight_fp8,
+        weight_scale=weight_scale,
+        activation_scale=act_scale,
     )
+
+
+def quantize_weight_fp8_smoothquant(
+    weight: torch.Tensor,
+    act_stats,
+    alpha: float = 0.5,
+    eps: float = 1e-4,
+) -> QuantizedLinearWeight:
+    input_scale = _awq_input_scale(weight, act_stats, alpha=alpha, eps=eps)
+    scaled_weight = weight.detach().float() * input_scale.to(device=weight.device)[None, :]
+    quantized = quantize_weight_fp8_rtn(scaled_weight, activation_scale=1.0)
+    quantized.input_scale = input_scale
+    quantized.activation_scale = _activation_scale_from_stats(act_stats, weight.device)
+    return quantized
 
 
 def quantize_linear_weight(weight: torch.Tensor, cfg, act_stats=None) -> QuantizedLinearWeight:
     if hasattr(cfg, "validate"):
         cfg.validate()
 
-    if getattr(cfg, "quant_dtype", "int") == "nvfp4":
+    if getattr(cfg, "quant_dtype", "int") == "int" and hasattr(cfg, "activation_granularity"):
         if cfg.algo == "rtn":
-            return quantize_weight_nvfp4_rtn(weight)
-        if cfg.algo == "awq":
-            return quantize_weight_nvfp4_awq(
+            qweight, scales, zeros = quantize_weight_rtn(
+                weight, bits=8, group_size=-1, symmetric=True
+            )
+            return QuantizedLinearWeight(qweight=qweight, scales=scales, zeros=zeros)
+        if cfg.algo == "smoothquant":
+            return quantize_weight_int8_smoothquant(
                 weight,
                 act_stats=act_stats,
-                alpha=getattr(cfg, "awq_alpha", 0.5),
-                eps=getattr(cfg, "awq_scale_eps", 1e-4),
+                alpha=getattr(cfg, "smoothquant_alpha", 0.5),
+                eps=getattr(cfg, "smoothquant_scale_eps", 1e-4),
             )
-        raise ValueError(f"Unknown quantization algo: {cfg.algo}")
+        raise ValueError(f"Unknown INT8 W8A8 quantization algo: {cfg.algo}")
+
+    if getattr(cfg, "quant_dtype", "int") == "fp8":
+        if cfg.algo == "rtn":
+            return quantize_weight_fp8_rtn(
+                weight,
+                activation_scale=getattr(cfg, "activation_scale", 1.0),
+            )
+        if cfg.algo == "smoothquant":
+            return quantize_weight_fp8_smoothquant(
+                weight,
+                act_stats=act_stats,
+                alpha=getattr(cfg, "smoothquant_alpha", 0.5),
+                eps=getattr(cfg, "smoothquant_scale_eps", 1e-4),
+            )
+        raise ValueError(f"Unknown W8A8 quantization algo: {cfg.algo}")
 
     if cfg.algo == "rtn":
         qweight, scales, zeros = quantize_weight_rtn(
