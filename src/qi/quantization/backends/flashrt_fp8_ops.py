@@ -62,11 +62,10 @@ class FlashRTFP8Ops:
     def quantize_weight(self, weight_nk: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if weight_nk.dim() != 2:
             raise ValueError(f"Expected a 2D linear weight, got shape {tuple(weight_nk.shape)}.")
-        # nn.Linear stores (N, K); fp8_nn_dev consumes B as (K, N).
-        weight_kn = weight_nk.detach().t().contiguous()
-        return quantize_to_fp8_e4m3(weight_kn)
+        # nn.Linear and fp8_run_dev both consume B as (N, K).
+        return quantize_to_fp8_e4m3(weight_nk.detach().contiguous())
 
-    def fp8_nn_dev(
+    def fp8_run_dev(
         self,
         a_fp8: torch.Tensor,
         b_fp8: torch.Tensor,
@@ -77,7 +76,7 @@ class FlashRTFP8Ops:
         act_scale: torch.Tensor,
         weight_scale: torch.Tensor,
     ) -> None:
-        self.runner.fp8_nn_dev(
+        self.runner.fp8_run_dev(
             a_fp8.data_ptr(),
             b_fp8.data_ptr(),
             out.data_ptr(),
@@ -133,8 +132,8 @@ def load_flashrt_fp8_ops(required: bool = True) -> FlashRTFP8Ops | None:
             )
 
         runner = runner_cls()
-        if getattr(runner, "fp8_nn_dev", None) is None:
-            raise FlashRTFP8Unavailable("FlashRT GemmRunner is missing fp8_nn_dev.")
+        if getattr(runner, "fp8_run_dev", None) is None:
+            raise FlashRTFP8Unavailable("FlashRT GemmRunner is missing fp8_run_dev.")
 
         return FlashRTFP8Ops(
             kernels=kernels,
@@ -177,7 +176,7 @@ class FlashRTFP8Backend:
             raise FlashRTFP8Unavailable(
                 "FlashRT FP8 kernels are not available. Build/install FlashRT so "
                 "`flash_rt.flash_rt_kernels` exposes quantize_fp8_static and "
-                "GemmRunner.fp8_nn_dev."
+                "GemmRunner.fp8_run_dev."
                 + _hardware_note()
             )
         if bits != 8:
@@ -198,12 +197,12 @@ class FlashRTFP8Backend:
 
         in_features = int(x_kernel.shape[-1])
         if weight_fp8.dim() != 2:
-            raise ValueError(f"Expected weight_fp8 to be 2D (K, N), got {tuple(weight_fp8.shape)}.")
-        if int(weight_fp8.shape[0]) != in_features:
+            raise ValueError(f"Expected weight_fp8 to be 2D (N, K), got {tuple(weight_fp8.shape)}.")
+        if int(weight_fp8.shape[1]) != in_features:
             raise ValueError(
-                f"FlashRT FP8 K mismatch: activation K={in_features}, weight K={int(weight_fp8.shape[0])}."
+                f"FlashRT FP8 K mismatch: activation K={in_features}, weight K={int(weight_fp8.shape[1])}."
             )
-        out_features = int(weight_fp8.shape[1])
+        out_features = int(weight_fp8.shape[0])
 
         x_2d = x_kernel.reshape(-1, in_features).to(dtype=torch.bfloat16).contiguous()
         m = int(x_2d.shape[0])
@@ -216,7 +215,7 @@ class FlashRTFP8Backend:
             torch.cuda.current_stream(x.device).cuda_stream,
         )
         out = torch.empty((m, out_features), dtype=torch.bfloat16, device=x.device)
-        self._ops.fp8_nn_dev(
+        self._ops.fp8_run_dev(
             x_fp8,
             weight_fp8.contiguous(),
             out,

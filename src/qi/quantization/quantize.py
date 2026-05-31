@@ -203,7 +203,7 @@ def quantize_weight_fp8_rtn(weight: torch.Tensor, activation_scale: float = 1.0)
     if ops is not None and weight.is_cuda:
         weight_fp8, weight_scale = ops.quantize_weight(weight.detach())
     else:
-        weight_fp8, weight_scale = quantize_to_fp8_e4m3(weight.detach().t().contiguous())
+        weight_fp8, weight_scale = quantize_to_fp8_e4m3(weight.detach().contiguous())
     act_scale = torch.tensor([float(activation_scale)], dtype=torch.float32, device=weight.device).clamp(min=1e-12)
     return QuantizedLinearWeight(
         qweight=None,

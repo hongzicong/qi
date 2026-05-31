@@ -192,7 +192,7 @@ def prepare_model_for_weight_only_load(
                 if activation_scale is None:
                     activation_scale = _state_empty_like(state_dict, container_key, full_name, "scale_factors")
                 if weight_fp8 is None:
-                    weight_fp8 = torch.empty((in_features, out_features), dtype=torch.uint8)
+                    weight_fp8 = torch.empty((out_features, in_features), dtype=torch.uint8)
                 if weight_scale is None:
                     weight_scale = torch.empty((1,), dtype=torch.float32)
                 if activation_scale is None:

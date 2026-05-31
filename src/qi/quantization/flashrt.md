@@ -3,9 +3,9 @@
 FlashRT provides the accelerated `flashrt_fp8` backend for FP8 E4M3 W8A8 inference.
 
 ```text
-weight: FP8 E4M3 bytes, layout (K, N)
+weight: FP8 E4M3 bytes, layout (N, K)
 activation: quantized to FP8 E4M3 at runtime
-GEMM: FlashRT GemmRunner.fp8_nn_dev
+GEMM: FlashRT GemmRunner.fp8_run_dev
 ```
 
 
@@ -64,4 +64,4 @@ cd $QI_ROOT
 python -B -c 'from qi.quantization.backends.flashrt_fp8_ops import load_flashrt_fp8_ops; load_flashrt_fp8_ops(required=True); print("FlashRT FP8 backend is available")'
 ```
 
-The extension must expose `quantize_fp8_static` and `GemmRunner.fp8_nn_dev`.
+The extension must expose `quantize_fp8_static` and `GemmRunner.fp8_run_dev`.
