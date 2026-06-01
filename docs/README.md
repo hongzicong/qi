@@ -33,4 +33,4 @@ Once the container is set up, follow [common.md](common.md) to download the requ
 
 | Guide | Notes |
 |-------|-------|
-| [Cobot Magic](deploy_real_rtc.md) | Physical robot deployment with real-time chunking (RTC) |
+| [Cobot Magic](deploy_real_bot.md) | Physical robot deployment |
