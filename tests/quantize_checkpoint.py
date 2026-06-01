@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import torch
@@ -37,12 +38,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config-dir", default="configs")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--mixed-precision", choices=["no", "fp16", "bf16"], default="bf16")
+    parser.add_argument(
+        "--model-base-path",
+        default=None,
+        help=(
+            "Local DiffSynth/Wan checkpoint root containing subdirectories like "
+            "Wan-AI/Wan2.2-TI2V-5B. Sets DIFFSYNTH_MODEL_BASE_PATH before model loading."
+        ),
+    )
+    parser.add_argument(
+        "--skip-download",
+        action="store_true",
+        help="Set DIFFSYNTH_SKIP_DOWNLOAD=true so missing pretrained files fail instead of downloading.",
+    )
 
     parser.add_argument("--quant-algo", choices=["rtn", "awq", "smoothquant"], default="rtn")
     parser.add_argument("--quant-dtype", choices=["int", "fp8"], default="int")
     parser.add_argument(
         "--quant-backend",
-        choices=["reference", "cuda_ext", "flashrt_fp8"],
+        choices=["reference", "cuda_ext", "flashrt_fp8", "int8_w8a8"],
         default="reference",
     )
     parser.add_argument("--quant-bits", type=int, default=8)
@@ -67,6 +81,16 @@ def parse_args() -> argparse.Namespace:
         help="Path to torch-saved activation stats. Required for --quant-algo awq/smoothquant.",
     )
     return parser.parse_args()
+
+
+def configure_local_model_loading(args: argparse.Namespace) -> None:
+    if args.model_base_path:
+        model_base_path = Path(args.model_base_path).expanduser().resolve()
+        os.environ["DIFFSYNTH_MODEL_BASE_PATH"] = str(model_base_path)
+        logger.info("Using local model base path: %s", model_base_path)
+    if args.skip_download:
+        os.environ["DIFFSYNTH_SKIP_DOWNLOAD"] = "true"
+        logger.info("DIFFSYNTH_SKIP_DOWNLOAD=true; missing pretrained files will not be downloaded.")
 
 
 def build_quant_config(args: argparse.Namespace) -> WeightOnlyQuantConfig | WeightActivationQuantConfig:
@@ -94,7 +118,12 @@ def build_quant_config(args: argparse.Namespace) -> WeightOnlyQuantConfig | Weig
             smoothquant_scale_eps=args.smoothquant_scale_eps,
             activation_scale=args.activation_scale,
         )
-    if args.quant_algo == "smoothquant" or args.activation_granularity is not None or args.weight_granularity is not None:
+    if (
+        args.quant_backend == "int8_w8a8"
+        or args.quant_algo == "smoothquant"
+        or args.activation_granularity is not None
+        or args.weight_granularity is not None
+    ):
         return WeightActivationQuantConfig(
             **common,
             algo=args.quant_algo,
@@ -123,6 +152,7 @@ def build_quant_config(args: argparse.Namespace) -> WeightOnlyQuantConfig | Weig
 def main() -> None:
     args = parse_args()
     setup_logging()
+    configure_local_model_loading(args)
     cfg = load_config(args)
     model_dtype = dtype_from_mixed_precision(args.mixed_precision)
     model = instantiate(cfg.model, model_dtype=model_dtype, device=args.device)
