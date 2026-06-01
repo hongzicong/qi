@@ -508,6 +508,7 @@ class FastWAM(torch.nn.Module):
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
         module_cuda_graph: bool = True,
+        module_torch_compile: bool = False,
     ):
         super().__init__()
         self.video_expert = video_expert
@@ -555,11 +556,14 @@ class FastWAM(torch.nn.Module):
         self.loss_lambda_video = float(loss_lambda_video)
         self.loss_lambda_action = float(loss_lambda_action)
         self._module_graphs_enabled = bool(module_cuda_graph)
+        self._module_torch_compile_enabled = bool(module_torch_compile)
         
         # CUDA Graph manager (wraps MoT body only)
         self._graph_mgr: Optional[CUDAGraphManager] = None
         self._vae_encode_graph_mgr: Optional[VaeEncodeCUDAGraphManager] = None
         self._prefill_graph_mgr: Optional[PrefillCUDAGraphManager] = None
+        self._module_vae_encode_fn = None
+        self._module_prefill_fn = None
 
         self.to(self.device)
 
@@ -588,6 +592,7 @@ class FastWAM(torch.nn.Module):
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
         module_cuda_graph: bool = True,
+        module_torch_compile: bool = False,
     ):
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required for FastWAM.from_wan22_pretrained().")
@@ -646,6 +651,7 @@ class FastWAM(torch.nn.Module):
             loss_lambda_video=loss_lambda_video,
             loss_lambda_action=loss_lambda_action,
             module_cuda_graph=module_cuda_graph,
+            module_torch_compile=module_torch_compile,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -1544,8 +1550,23 @@ class FastWAM(torch.nn.Module):
         self._setup_module_graph_mgrs()
 
     def _setup_module_graph_mgrs(self) -> None:
-        self._vae_encode_graph_mgr = VaeEncodeCUDAGraphManager(self.vae.encode, self.device)
-        self._prefill_graph_mgr = PrefillCUDAGraphManager(self.mot.prefill_video_cache)
+        vae_encode_fn = self.vae.encode
+        prefill_fn = self.mot.prefill_video_cache
+
+        if self._module_torch_compile_enabled:
+            try:
+                vae_encode_fn = torch.compile(vae_encode_fn)
+            except Exception as exc:
+                logger.warning("torch.compile for VAE encode failed; falling back to eager: %s", exc)
+            try:
+                prefill_fn = torch.compile(prefill_fn)
+            except Exception as exc:
+                logger.warning("torch.compile for prefill failed; falling back to eager: %s", exc)
+
+        self._module_vae_encode_fn = vae_encode_fn
+        self._module_prefill_fn = prefill_fn
+        self._vae_encode_graph_mgr = VaeEncodeCUDAGraphManager(self._module_vae_encode_fn, self.device)
+        self._prefill_graph_mgr = PrefillCUDAGraphManager(self._module_prefill_fn)
 
     @torch.inference_mode()
     def infer_action(
@@ -1609,8 +1630,16 @@ class FastWAM(torch.nn.Module):
 
         input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
         module_cuda_graph = bool(cuda_graph and self._module_graphs_enabled and input_image.is_cuda)
-        if module_cuda_graph and (
-            self._vae_encode_graph_mgr is None or self._prefill_graph_mgr is None
+        module_compile_only = bool(
+            (not module_cuda_graph)
+            and self._module_torch_compile_enabled
+            and input_image.is_cuda
+        )
+        if (module_cuda_graph or module_compile_only) and (
+            self._vae_encode_graph_mgr is None
+            or self._prefill_graph_mgr is None
+            or self._module_vae_encode_fn is None
+            or self._module_prefill_fn is None
         ):
             self._setup_module_graph_mgrs()
 
@@ -1626,6 +1655,20 @@ class FastWAM(torch.nn.Module):
             except Exception as exc:
                 logger.warning("VAE encode CUDA Graph failed; falling back to eager: %s", exc)
                 self._vae_encode_graph_mgr.reset()
+                first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+        elif module_compile_only and self._module_vae_encode_fn is not None:
+            try:
+                first_frame_latents = VaeEncodeCUDAGraphManager._normalize_output(
+                    self._module_vae_encode_fn(
+                        [image],
+                        device=self.device,
+                        tiled=tiled,
+                        tile_size=(30, 52),
+                        tile_stride=(15, 26),
+                    )
+                )
+            except Exception as exc:
+                logger.warning("VAE compile-only path failed; falling back to eager: %s", exc)
                 first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
         else:
             first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
@@ -1698,6 +1741,24 @@ class FastWAM(torch.nn.Module):
             except Exception as exc:
                 logger.warning("Prefill CUDA Graph failed; falling back to eager: %s", exc)
                 self._prefill_graph_mgr.reset()
+                video_kv_cache = self.mot.prefill_video_cache(
+                    video_tokens=video_pre["tokens"],
+                    video_freqs=video_pre["freqs"],
+                    video_t_mod=video_pre["t_mod"],
+                    video_context_payload=prefill_payload,
+                    video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
+                )
+        elif module_compile_only and self._module_prefill_fn is not None:
+            try:
+                video_kv_cache = self._module_prefill_fn(
+                    video_tokens=video_pre["tokens"],
+                    video_freqs=video_pre["freqs"],
+                    video_t_mod=video_pre["t_mod"],
+                    video_context_payload=prefill_payload,
+                    video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
+                )
+            except Exception as exc:
+                logger.warning("Prefill compile-only path failed; falling back to eager: %s", exc)
                 video_kv_cache = self.mot.prefill_video_cache(
                     video_tokens=video_pre["tokens"],
                     video_freqs=video_pre["freqs"],

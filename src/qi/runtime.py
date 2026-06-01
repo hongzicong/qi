@@ -88,6 +88,7 @@ def create_fastwam(
     mot_checkpoint_mixed_attn: bool = True,
     redirect_common_files: bool = True,
     module_cuda_graph: bool = True,
+    module_torch_compile: bool = False,
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
 ):
@@ -148,6 +149,7 @@ def create_fastwam(
         skip_dit_load_from_pretrain=bool(skip_dit_load_from_pretrain),
         mot_checkpoint_mixed_attn=bool(mot_checkpoint_mixed_attn),
         module_cuda_graph=bool(module_cuda_graph),
+        module_torch_compile=bool(module_torch_compile),
         video_train_shift=float(video_scheduler.get("train_shift", 5.0)),
         video_infer_shift=float(video_scheduler.get("infer_shift", 5.0)),
         video_num_train_timesteps=int(video_scheduler.get("num_train_timesteps", 1000)),
