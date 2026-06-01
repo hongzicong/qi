@@ -20,6 +20,7 @@ export QI_AWQ_STATS="${QI_AWQ_STATS:-${DIFFSYNTH_MODEL_BASE_PATH}/awq_stats.pt}"
 export QI_RTN_CKPT="${QI_RTN_CKPT:-${DIFFSYNTH_MODEL_BASE_PATH}/step_008140_rtn_w8.pt}"
 export QI_AWQ_CKPT="${QI_AWQ_CKPT:-${DIFFSYNTH_MODEL_BASE_PATH}/step_008140_awq_w4.pt}"
 export QI_SQ_INT8_CKPT="${QI_SQ_INT8_CKPT:-${DIFFSYNTH_MODEL_BASE_PATH}/step_008140_smoothquant_int8.pt}"
+export QI_SQ_INT8_NATIVE_CKPT="${QI_SQ_INT8_NATIVE_CKPT:-${DIFFSYNTH_MODEL_BASE_PATH}/step_008140_smoothquant_int8_native.pt}"
 export QI_RTN_FP8_CKPT="${DIFFSYNTH_MODEL_BASE_PATH}/step_008140_rtn_fp8.pt"
 export QI_SQ_FP8_CKPT="${DIFFSYNTH_MODEL_BASE_PATH}/step_008140_smoothquant_fp8.pt"
 
@@ -31,6 +32,14 @@ echo "DIFFSYNTH_MODEL_BASE_PATH=${DIFFSYNTH_MODEL_BASE_PATH}"
 echo "OUTPUT_PATH=${OUTPUT_PATH}"
 ```
 For FlashRT installation, see [`flashrt.md`](flashrt.md).
+
+For Qi native INT8 W8A8 kernels:
+
+```bash
+git clone --depth 1 --branch v4.4.2 https://github.com/NVIDIA/cutlass.git third_party/cutlass
+QI_BUILD_INT8_W8A8=1 QI_CUTLASS_DIR=$QI_ROOT/third_party/cutlass python setup.py build_ext --inplace
+python -B -c 'from qi.quantization.backends.int8_w8a8_ops import load_int8_w8a8_ops; load_int8_w8a8_ops(required=True); print("Qi INT8 W8A8 backend is available")'
+```
 
 ## Prepare Quantized Checkpoints
 
@@ -91,6 +100,24 @@ python tests/quantize_checkpoint.py \
   --activation-granularity per_token \
   --weight-granularity per_channel \
   --quant-backend reference
+```
+
+### Smoothquant INT8 W8A8 per-token/channel backend=int8_w8a8
+
+dynamic activation scale with Qi native CUTLASS INT8 kernels
+
+```bash
+python tests/quantize_checkpoint.py \
+  --ckpt $QI_BASE_CKPT \
+  --output-ckpt $QI_SQ_INT8_NATIVE_CKPT \
+  --dataset-stats $QI_DATASET_STATS \
+  --quant-algo smoothquant \
+  --quant-dtype int \
+  --quant-bits 8 \
+  --awq-stats $QI_AWQ_STATS \
+  --activation-granularity per_token \
+  --weight-granularity per_channel \
+  --quant-backend int8_w8a8
 ```
 
 ### RTN FP8 W8A8 per-tensor backend=flashrt_fp8

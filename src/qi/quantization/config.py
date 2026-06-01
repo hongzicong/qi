@@ -62,7 +62,7 @@ class WeightActivationQuantConfig:
     quant_dtype: Literal["fp8", "int"] = "fp8"
     bits: int = 8
     activation_bits: int = 8
-    backend: Literal["flashrt_fp8", "reference"] = "flashrt_fp8"
+    backend: Literal["flashrt_fp8", "reference", "int8_w8a8"] = "flashrt_fp8"
     activation_granularity: Literal["per_tensor", "per_token"] = "per_tensor"
     weight_granularity: Literal["per_tensor", "per_channel"] = "per_tensor"
     group_size: int = -1
@@ -95,8 +95,8 @@ class WeightActivationQuantConfig:
             if self.activation_granularity != "per_tensor" or self.weight_granularity != "per_tensor":
                 raise ValueError("FP8 W8A8 currently supports per_tensor activation and weight scales only.")
         elif self.quant_dtype == "int":
-            if self.backend != "reference":
-                raise ValueError(f"INT8 W8A8 currently requires backend=\"reference\", got {self.backend}.")
+            if self.backend not in ("reference", "int8_w8a8"):
+                raise ValueError(f"INT8 W8A8 requires backend=\"reference\" or \"int8_w8a8\", got {self.backend}.")
             if self.activation_granularity != "per_token":
                 raise ValueError("INT8 W8A8 currently requires activation_granularity=\"per_token\".")
             if self.weight_granularity != "per_channel":
@@ -104,7 +104,7 @@ class WeightActivationQuantConfig:
             if self.group_size != -1:
                 raise ValueError("INT8 W8A8 per-channel weights require group_size=-1.")
             if not self.symmetric:
-                raise ValueError("INT8 W8A8 reference backend currently requires symmetric quantization.")
+                raise ValueError("INT8 W8A8 currently requires symmetric quantization.")
         else:
             raise ValueError(f"Unsupported W8A8 quant_dtype: {self.quant_dtype}.")
         if not 0.0 <= float(self.smoothquant_alpha) <= 1.0:

@@ -1,0 +1,5 @@
+# ninja log v7
+2	2203	1780238368476637139	/workspace/桌面/qi/build/temp.linux-aarch64-cpython-310/workspace/桌面/qi/src/qi/quantization/csrc/int8_w8a8/quantize_int8.o	60cf5ed8e798df9b
+2	33958	1780238368476637139	/workspace/桌面/qi/build/temp.linux-aarch64-cpython-310/workspace/桌面/qi/src/qi/quantization/csrc/int8_w8a8/cutlass_int8_rowwise_t64x128.o	296156920958db6
+1	35586	1780238368472637402	/workspace/桌面/qi/build/temp.linux-aarch64-cpython-310/workspace/桌面/qi/src/qi/quantization/csrc/int8_w8a8/cutlass_int8_rowwise.o	a6f936f9828132ae
+0	51131	1780238368472637402	/workspace/桌面/qi/build/temp.linux-aarch64-cpython-310/workspace/桌面/qi/src/qi/quantization/csrc/int8_w8a8/bindings.o	a6fed3cddb09f685
