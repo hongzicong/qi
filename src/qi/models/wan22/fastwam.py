@@ -1,4 +1,5 @@
 import time
+from contextlib import contextmanager, nullcontext
 from typing import Any, Optional, Sequence, Union
 
 import torch
@@ -15,6 +16,21 @@ from .mot import MoT
 from .schedulers.scheduler_continuous import WanContinuousFlowMatchScheduler
 
 logger = get_logger(__name__)
+
+_PY_NVTX: Any = None
+_PY_NVTX_READY = False
+_NVTX_WARNED = False
+
+
+def _load_py_nvtx() -> Any:
+    global _PY_NVTX, _PY_NVTX_READY
+    if not _PY_NVTX_READY:
+        try:
+            _PY_NVTX = __import__("nvtx")
+        except Exception:
+            _PY_NVTX = None
+        _PY_NVTX_READY = True
+    return _PY_NVTX
 
 
 class CUDAGraphManager:
@@ -1562,6 +1578,41 @@ class FastWAM(torch.nn.Module):
         self._vae_encode_graph_mgr = VaeEncodeCUDAGraphManager(self._module_vae_encode_fn, self.device)
         self._prefill_graph_mgr = PrefillCUDAGraphManager(self._module_prefill_fn)
 
+    @contextmanager
+    def _nvtx_range(self, name: str, enabled: bool = True):
+        global _NVTX_WARNED
+        if not enabled:
+            yield
+            return
+        backend = None
+        token: Any = None
+        py_nvtx = _load_py_nvtx()
+        try:
+            if py_nvtx is not None:
+                token = py_nvtx.start_range(message=name)
+                backend = "nvtx"
+            else:
+                torch.cuda.nvtx.range_push(name)
+                backend = "torch"
+        except Exception as exc:
+            if not _NVTX_WARNED:
+                logger.warning("NVTX range emit failed once in FastWAM; continuing without NVTX ranges: %s", exc)
+                _NVTX_WARNED = True
+            backend = None
+        try:
+            yield
+        finally:
+            if backend == "nvtx":
+                try:
+                    py_nvtx.end_range(token)
+                except Exception:
+                    pass
+            elif backend == "torch":
+                try:
+                    torch.cuda.nvtx.range_pop()
+                except Exception:
+                    pass
+
     @torch.inference_mode()
     def infer_action(
         self,
@@ -1585,282 +1636,307 @@ class FastWAM(torch.nn.Module):
         cuda_graph: bool = True,
     ) -> dict[str, Any]:
         self.eval()
-        if str(getattr(self.video_expert, "video_attention_mask_mode", "")) != "first_frame_causal":
-            raise ValueError(
-                "`infer_action` requires `video_attention_mask_mode='first_frame_causal'`."
-            )
-
-        if input_image.ndim == 3:
-            input_image = input_image.unsqueeze(0)
-        if input_image.ndim != 4 or input_image.shape[0] != 1 or input_image.shape[1] != 3:
-            raise ValueError(
-                f"`input_image` must have shape [1,3,H,W] or [3,H,W], got {tuple(input_image.shape)}"
-            )
-        _, _, height, width = input_image.shape
-        if height % 16 != 0 or width % 16 != 0:
-            raise ValueError(
-                f"`input_image` must be resized before infer, expected multiples of 16 but got HxW=({height},{width})"
-            )
-        if proprio is not None:
-            if self.proprio_dim is None:
-                raise ValueError("`proprio` was provided but `proprio_dim=None` so `proprio_encoder` is disabled.")
-            if proprio.ndim == 1:
-                proprio = proprio.unsqueeze(0)
-            elif proprio.ndim == 2 and proprio.shape[0] == 1:
-                pass
-            else:
-                raise ValueError(f"`proprio` must be [D] or [1,D], got shape {tuple(proprio.shape)}")
-            if proprio.shape[1] != self.proprio_dim:
-                raise ValueError(f"`proprio` last dim must be {self.proprio_dim}, got {proprio.shape[1]}")
-            proprio = proprio.to(device=self.device, dtype=self.torch_dtype)
-
-        generator = None if seed is None else torch.Generator(device=rand_device).manual_seed(seed)
-        latents_action = torch.randn(
-            (1, action_horizon, self.action_expert.action_dim),
-            generator=generator,
-            device=rand_device,
-            dtype=torch.float32,
-        ).to(device=self.device, dtype=self.torch_dtype)
-
-        input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
-        module_cuda_graph = bool(cuda_graph and input_image.is_cuda)
-        module_compile_only = bool(
-            (not module_cuda_graph)
-            and self._module_torch_compile_enabled
-            and input_image.is_cuda
+        nvtx_enabled = bool(
+            torch.cuda.is_available()
+            and isinstance(self.device, torch.device)
+            and self.device.type == "cuda"
         )
-        if (module_cuda_graph or module_compile_only) and (
-            self._vae_encode_graph_mgr is None
-            or self._prefill_graph_mgr is None
-            or self._module_vae_encode_fn is None
-            or self._module_prefill_fn is None
-        ):
-            self._setup_module_graph_mgrs()
+        with nullcontext():
+            with self._nvtx_range("preprocess", enabled=nvtx_enabled):
+                if str(getattr(self.video_expert, "video_attention_mask_mode", "")) != "first_frame_causal":
+                    raise ValueError(
+                        "`infer_action` requires `video_attention_mask_mode='first_frame_causal'`."
+                    )
 
-        image = input_image[0].unsqueeze(1)
-        if module_cuda_graph and self._vae_encode_graph_mgr is not None:
-            try:
-                first_frame_latents = self._vae_encode_graph_mgr.run(
-                    image=image,
-                    tiled=tiled,
-                    tile_size=(30, 52),
-                    tile_stride=(15, 26),
+                if input_image.ndim == 3:
+                    input_image = input_image.unsqueeze(0)
+                if input_image.ndim != 4 or input_image.shape[0] != 1 or input_image.shape[1] != 3:
+                    raise ValueError(
+                        f"`input_image` must have shape [1,3,H,W] or [3,H,W], got {tuple(input_image.shape)}"
+                    )
+                _, _, height, width = input_image.shape
+                if height % 16 != 0 or width % 16 != 0:
+                    raise ValueError(
+                        f"`input_image` must be resized before infer, expected multiples of 16 but got HxW=({height},{width})"
+                    )
+                if proprio is not None:
+                    if self.proprio_dim is None:
+                        raise ValueError("`proprio` was provided but `proprio_dim=None` so `proprio_encoder` is disabled.")
+                    if proprio.ndim == 1:
+                        proprio = proprio.unsqueeze(0)
+                    elif proprio.ndim == 2 and proprio.shape[0] == 1:
+                        pass
+                    else:
+                        raise ValueError(f"`proprio` must be [D] or [1,D], got shape {tuple(proprio.shape)}")
+                    if proprio.shape[1] != self.proprio_dim:
+                        raise ValueError(f"`proprio` last dim must be {self.proprio_dim}, got {proprio.shape[1]}")
+                    proprio = proprio.to(device=self.device, dtype=self.torch_dtype)
+
+                generator = None if seed is None else torch.Generator(device=rand_device).manual_seed(seed)
+                latents_action = torch.randn(
+                    (1, action_horizon, self.action_expert.action_dim),
+                    generator=generator,
+                    device=rand_device,
+                    dtype=torch.float32,
+                ).to(device=self.device, dtype=self.torch_dtype)
+
+                input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
+                module_cuda_graph = bool(cuda_graph and input_image.is_cuda)
+                module_compile_only = bool(
+                    (not module_cuda_graph)
+                    and self._module_torch_compile_enabled
+                    and input_image.is_cuda
                 )
-            except Exception as exc:
-                logger.warning("VAE encode CUDA Graph failed; falling back to eager: %s", exc)
-                self._vae_encode_graph_mgr.reset()
-                first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
-        elif module_compile_only and self._module_vae_encode_fn is not None:
-            try:
-                first_frame_latents = VaeEncodeCUDAGraphManager._normalize_output(
-                    self._module_vae_encode_fn(
-                        [image],
+                if (module_cuda_graph or module_compile_only) and (
+                    self._vae_encode_graph_mgr is None
+                    or self._prefill_graph_mgr is None
+                    or self._module_vae_encode_fn is None
+                    or self._module_prefill_fn is None
+                ):
+                    self._setup_module_graph_mgrs()
+
+                with self._nvtx_range("VAE", enabled=nvtx_enabled):
+                    image = input_image[0].unsqueeze(1)
+                    if module_cuda_graph and self._vae_encode_graph_mgr is not None:
+                        try:
+                            first_frame_latents = self._vae_encode_graph_mgr.run(
+                                image=image,
+                                tiled=tiled,
+                                tile_size=(30, 52),
+                                tile_stride=(15, 26),
+                            )
+                        except Exception as exc:
+                            logger.warning("VAE encode CUDA Graph failed; falling back to eager: %s", exc)
+                            self._vae_encode_graph_mgr.reset()
+                            first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+                    elif module_compile_only and self._module_vae_encode_fn is not None:
+                        try:
+                            first_frame_latents = VaeEncodeCUDAGraphManager._normalize_output(
+                                self._module_vae_encode_fn(
+                                    [image],
+                                    device=self.device,
+                                    tiled=tiled,
+                                    tile_size=(30, 52),
+                                    tile_stride=(15, 26),
+                                )
+                            )
+                        except Exception as exc:
+                            logger.warning("VAE compile-only path failed; falling back to eager: %s", exc)
+                            first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+                    else:
+                        first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+                fuse_flag = bool(getattr(self.video_expert, "fuse_vae_embedding_in_latents", False))
+
+                with self._nvtx_range("PromptContext", enabled=nvtx_enabled):
+                    use_prompt = prompt is not None
+                    use_context = context is not None or context_mask is not None
+                    if use_prompt and use_context:
+                        raise ValueError("`prompt` and `context/context_mask` are mutually exclusive.")
+                    if not use_prompt and not use_context:
+                        raise ValueError("Either `prompt` or both `context/context_mask` must be provided.")
+
+                    if use_prompt:
+                        context, context_mask = self.encode_prompt(prompt)
+                    else:
+                        if context is None or context_mask is None:
+                            raise ValueError("`context` and `context_mask` must be both provided together.")
+                        if context.ndim == 2:
+                            context = context.unsqueeze(0)
+                        if context_mask.ndim == 1:
+                            context_mask = context_mask.unsqueeze(0)
+                        if context.ndim != 3 or context_mask.ndim != 2:
+                            raise ValueError(
+                                f"`context/context_mask` must be [B,L,D]/[B,L], got {tuple(context.shape)} and {tuple(context_mask.shape)}"
+                            )
+                        context = context.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
+                        context_mask = context_mask.to(device=self.device, dtype=torch.bool, non_blocking=True)
+                    if proprio is not None:
+                        context, context_mask = self._append_proprio_to_context(
+                            context=context,
+                            context_mask=context_mask,
+                            proprio=proprio,
+                        )
+
+                # --- Update persistent tensors via graph manager ---
+                # (context/mask + video_kv are pinned by reference for CUDA Graph)
+                with self._nvtx_range("VideoPreDiT", enabled=nvtx_enabled):
+                    timestep_video = torch.zeros(
+                        (first_frame_latents.shape[0],),
+                        dtype=first_frame_latents.dtype,
                         device=self.device,
-                        tiled=tiled,
-                        tile_size=(30, 52),
-                        tile_stride=(15, 26),
                     )
-                )
-            except Exception as exc:
-                logger.warning("VAE compile-only path failed; falling back to eager: %s", exc)
-                first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
-        else:
-            first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
-        fuse_flag = bool(getattr(self.video_expert, "fuse_vae_embedding_in_latents", False))
-
-        use_prompt = prompt is not None
-        use_context = context is not None or context_mask is not None
-        if use_prompt and use_context:
-            raise ValueError("`prompt` and `context/context_mask` are mutually exclusive.")
-        if not use_prompt and not use_context:
-            raise ValueError("Either `prompt` or both `context/context_mask` must be provided.")
-
-        if use_prompt:
-            context, context_mask = self.encode_prompt(prompt)
-        else:
-            if context is None or context_mask is None:
-                raise ValueError("`context` and `context_mask` must be both provided together.")
-            if context.ndim == 2:
-                context = context.unsqueeze(0)
-            if context_mask.ndim == 1:
-                context_mask = context_mask.unsqueeze(0)
-            if context.ndim != 3 or context_mask.ndim != 2:
-                raise ValueError(
-                    f"`context/context_mask` must be [B,L,D]/[B,L], got {tuple(context.shape)} and {tuple(context_mask.shape)}"
-                )
-            context = context.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
-            context_mask = context_mask.to(device=self.device, dtype=torch.bool, non_blocking=True)
-        if proprio is not None:
-            context, context_mask = self._append_proprio_to_context(
-                context=context,
-                context_mask=context_mask,
-                proprio=proprio,
-            )
-
-        # --- Update persistent tensors via graph manager ---
-        # (context/mask + video_kv are pinned by reference for CUDA Graph)
-        timestep_video = torch.zeros(
-            (first_frame_latents.shape[0],),
-            dtype=first_frame_latents.dtype,
-            device=self.device,
-        )
-        video_pre = self.video_expert.pre_dit(
-            x=first_frame_latents,
-            timestep=timestep_video,
-            context=context,
-            context_mask=context_mask,
-            action=None,
-            fuse_vae_embedding_in_latents=fuse_flag,
-        )
-        video_seq_len = int(video_pre["tokens"].shape[1])
-        attention_mask = self._build_mot_attention_mask(
-            video_seq_len=video_seq_len,
-            action_seq_len=latents_action.shape[1],
-            video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
-            device=video_pre["tokens"].device,
-        )
-        prefill_payload = {
-            "context": video_pre["context"],
-            "mask": video_pre["context_mask"],
-        }
-        if module_cuda_graph and self._prefill_graph_mgr is not None:
-            try:
-                video_kv_cache = self._prefill_graph_mgr.run(
-                    video_tokens=video_pre["tokens"],
-                    video_freqs=video_pre["freqs"],
-                    video_t_mod=video_pre["t_mod"],
-                    video_context_payload=prefill_payload,
-                    video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
-                )
-            except Exception as exc:
-                logger.warning("Prefill CUDA Graph failed; falling back to eager: %s", exc)
-                self._prefill_graph_mgr.reset()
-                video_kv_cache = self.mot.prefill_video_cache(
-                    video_tokens=video_pre["tokens"],
-                    video_freqs=video_pre["freqs"],
-                    video_t_mod=video_pre["t_mod"],
-                    video_context_payload=prefill_payload,
-                    video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
-                )
-        elif module_compile_only and self._module_prefill_fn is not None:
-            try:
-                video_kv_cache = self._module_prefill_fn(
-                    video_tokens=video_pre["tokens"],
-                    video_freqs=video_pre["freqs"],
-                    video_t_mod=video_pre["t_mod"],
-                    video_context_payload=prefill_payload,
-                    video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
-                )
-            except Exception as exc:
-                logger.warning("Prefill compile-only path failed; falling back to eager: %s", exc)
-                video_kv_cache = self.mot.prefill_video_cache(
-                    video_tokens=video_pre["tokens"],
-                    video_freqs=video_pre["freqs"],
-                    video_t_mod=video_pre["t_mod"],
-                    video_context_payload=prefill_payload,
-                    video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
-                )
-        else:
-            video_kv_cache = self.mot.prefill_video_cache(
-                video_tokens=video_pre["tokens"],
-                video_freqs=video_pre["freqs"],
-                video_t_mod=video_pre["t_mod"],
-                video_context_payload=prefill_payload,
-                video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
-            )
-
-        # Sync persistent tensors into graph manager (copy_ or reset)
-        if self._graph_mgr is not None:
-            self._graph_mgr.update_persistent(
-                context=context,
-                context_mask=context_mask,
-                video_kv_cache=video_kv_cache,
-                attention_mask=attention_mask,
-                video_seq_len=video_seq_len,
-            )
-
-        infer_timesteps_action, infer_deltas_action = self.infer_action_scheduler.build_inference_schedule(
-            num_inference_steps=num_inference_steps,
-            device=self.device,
-            dtype=latents_action.dtype,
-            shift_override=sigma_shift,
-        )
-        action_expert_cache = self._make_action_expert_cache(
-            enabled=expert_cache,
-            num_inference_steps=num_inference_steps,
-            reuse_steps=expert_cache_reuse_steps,
-            warmup_steps=expert_cache_warmup_steps,
-            cooldown_steps=expert_cache_cooldown_steps,
-        )
-        use_cuda_graph = cuda_graph and self._graph_mgr is not None
-        graph_warmup_steps = 0
-
-        for step_idx, (step_t_action, step_delta_action) in enumerate(
-            zip(infer_timesteps_action, infer_deltas_action)
-        ):
-            timestep_action = step_t_action.unsqueeze(0).to(
-                dtype=latents_action.dtype, device=self.device
-            )
-
-            # Stage 1: pre_dit — always eager (lightweight, provides body_input for cache)
-            action_pre = self.action_expert.pre_dit(
-                action_tokens=latents_action,
-                timestep=timestep_action,
-                context=context,
-                context_mask=context_mask,
-            )
-            body_input = action_pre["tokens"]
-
-            # Expert cache decision
-            cache_decision = None
-            if action_expert_cache is not None:
-                cache_decision = action_expert_cache.begin_step(step_idx)
-
-            # Stage 2: body — three sources, all output 1024-dim body_output
-            if cache_decision is not None and cache_decision.should_reuse:
-                # Cache reuse: skip body, just add residual
-                body_output = action_expert_cache.reuse(body_input)
-            elif use_cuda_graph and self._graph_mgr.captured and step_idx >= graph_warmup_steps:
-                # CUDA Graph replay (body only)
-                body_output = self._graph_mgr.replay(action_pre=action_pre)
-            else:
-                # Normal / warmup path
-                body_output = self.mot.forward_action_with_video_cache(
-                    action_tokens=body_input,
-                    action_freqs=action_pre["freqs"],
-                    action_t_mod=action_pre["t_mod"],
-                    action_context_payload={
-                        "context": action_pre["context"],
-                        "mask": action_pre["context_mask"],
-                    },
-                    video_kv_cache=video_kv_cache,
-                    attention_mask=attention_mask,
-                    video_seq_len=video_seq_len,
-                )
-                # Capture graph after warmup
-                if use_cuda_graph and step_idx == graph_warmup_steps and not self._graph_mgr.captured:
-                    self._graph_mgr.capture(
-                        action_pre=action_pre,
-                        attention_mask=attention_mask,
+                    video_pre = self.video_expert.pre_dit(
+                        x=first_frame_latents,
+                        timestep=timestep_video,
+                        context=context,
+                        context_mask=context_mask,
+                        action=None,
+                        fuse_vae_embedding_in_latents=fuse_flag,
+                    )
+                    video_seq_len = int(video_pre["tokens"].shape[1])
+                    attention_mask = self._build_mot_attention_mask(
                         video_seq_len=video_seq_len,
+                        action_seq_len=latents_action.shape[1],
+                        video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
+                        device=video_pre["tokens"].device,
                     )
+                    prefill_payload = {
+                        "context": video_pre["context"],
+                        "mask": video_pre["context_mask"],
+                    }
+                with self._nvtx_range("Prefill", enabled=nvtx_enabled):
+                    if module_cuda_graph and self._prefill_graph_mgr is not None:
+                        try:
+                            video_kv_cache = self._prefill_graph_mgr.run(
+                                video_tokens=video_pre["tokens"],
+                                video_freqs=video_pre["freqs"],
+                                video_t_mod=video_pre["t_mod"],
+                                video_context_payload=prefill_payload,
+                                video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
+                            )
+                        except Exception as exc:
+                            logger.warning("Prefill CUDA Graph failed; falling back to eager: %s", exc)
+                            self._prefill_graph_mgr.reset()
+                            video_kv_cache = self.mot.prefill_video_cache(
+                                video_tokens=video_pre["tokens"],
+                                video_freqs=video_pre["freqs"],
+                                video_t_mod=video_pre["t_mod"],
+                                video_context_payload=prefill_payload,
+                                video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
+                            )
+                    elif module_compile_only and self._module_prefill_fn is not None:
+                        try:
+                            video_kv_cache = self._module_prefill_fn(
+                                video_tokens=video_pre["tokens"],
+                                video_freqs=video_pre["freqs"],
+                                video_t_mod=video_pre["t_mod"],
+                                video_context_payload=prefill_payload,
+                                video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
+                            )
+                        except Exception as exc:
+                            logger.warning("Prefill compile-only path failed; falling back to eager: %s", exc)
+                            video_kv_cache = self.mot.prefill_video_cache(
+                                video_tokens=video_pre["tokens"],
+                                video_freqs=video_pre["freqs"],
+                                video_t_mod=video_pre["t_mod"],
+                                video_context_payload=prefill_payload,
+                                video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
+                            )
+                    else:
+                        video_kv_cache = self.mot.prefill_video_cache(
+                            video_tokens=video_pre["tokens"],
+                            video_freqs=video_pre["freqs"],
+                            video_t_mod=video_pre["t_mod"],
+                            video_context_payload=prefill_payload,
+                            video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
+                        )
 
-            # Stage 3: post_dit — always eager (single linear, μs-level)
-            pred_action = self.action_expert.post_dit(body_output, action_pre)
+                with self._nvtx_range("SchedulerSetup", enabled=nvtx_enabled):
+                    # Sync persistent tensors into graph manager (copy_ or reset)
+                    if self._graph_mgr is not None:
+                        self._graph_mgr.update_persistent(
+                            context=context,
+                            context_mask=context_mask,
+                            video_kv_cache=video_kv_cache,
+                            attention_mask=attention_mask,
+                            video_seq_len=video_seq_len,
+                        )
 
-            # Stage 4: cache update — now has correct 1024-dim body_output every step
-            if action_expert_cache is not None and not (cache_decision is not None and cache_decision.should_reuse):
-                action_expert_cache.update(body_input, body_output)
+                    infer_timesteps_action, infer_deltas_action = self.infer_action_scheduler.build_inference_schedule(
+                        num_inference_steps=num_inference_steps,
+                        device=self.device,
+                        dtype=latents_action.dtype,
+                        shift_override=sigma_shift,
+                    )
+                    action_expert_cache = self._make_action_expert_cache(
+                        enabled=expert_cache,
+                        num_inference_steps=num_inference_steps,
+                        reuse_steps=expert_cache_reuse_steps,
+                        warmup_steps=expert_cache_warmup_steps,
+                        cooldown_steps=expert_cache_cooldown_steps,
+                    )
+                    use_cuda_graph = cuda_graph and self._graph_mgr is not None
+                    graph_warmup_steps = 0
 
-            # Stage 5: scheduler step
-            latents_action = self.infer_action_scheduler.step(
-                pred_action, step_delta_action, latents_action
-            )
+            with self._nvtx_range("phase_denoise", enabled=nvtx_enabled):
+                for step_idx, (step_t_action, step_delta_action) in enumerate(
+                    zip(infer_timesteps_action, infer_deltas_action)
+                ):
+                    with self._nvtx_range(
+                        f"denoise_step_{step_idx:02d}",
+                        enabled=nvtx_enabled,
+                    ):
+                        timestep_action = step_t_action.unsqueeze(0).to(
+                            dtype=latents_action.dtype, device=self.device
+                        )
 
-        self._log_action_expert_cache(action_expert_cache)
-        return {
-            "action": latents_action[0].detach().to(device="cpu", dtype=torch.float32),
-        }
+                        with self._nvtx_range("ActionPreDiT", enabled=nvtx_enabled):
+                            # Stage 1: pre_dit — always eager (lightweight, provides body_input for cache)
+                            action_pre = self.action_expert.pre_dit(
+                                action_tokens=latents_action,
+                                timestep=timestep_action,
+                                context=context,
+                                context_mask=context_mask,
+                            )
+                            body_input = action_pre["tokens"]
+
+                        with self._nvtx_range("DiTBody", enabled=nvtx_enabled):
+                            # Expert cache decision
+                            cache_decision = None
+                            if action_expert_cache is not None:
+                                cache_decision = action_expert_cache.begin_step(step_idx)
+
+                            # Stage 2: body — three sources, all output 1024-dim body_output
+                            if cache_decision is not None and cache_decision.should_reuse:
+                                # Cache reuse: skip body, just add residual
+                                body_output = action_expert_cache.reuse(body_input)
+                            elif use_cuda_graph and self._graph_mgr.captured and step_idx >= graph_warmup_steps:
+                                # CUDA Graph replay (body only)
+                                body_output = self._graph_mgr.replay(action_pre=action_pre)
+                            else:
+                                # Normal / warmup path
+                                body_output = self.mot.forward_action_with_video_cache(
+                                    action_tokens=body_input,
+                                    action_freqs=action_pre["freqs"],
+                                    action_t_mod=action_pre["t_mod"],
+                                    action_context_payload={
+                                        "context": action_pre["context"],
+                                        "mask": action_pre["context_mask"],
+                                    },
+                                    video_kv_cache=video_kv_cache,
+                                    attention_mask=attention_mask,
+                                    video_seq_len=video_seq_len,
+                                )
+                                # Capture graph after warmup
+                                if use_cuda_graph and step_idx == graph_warmup_steps and not self._graph_mgr.captured:
+                                    self._graph_mgr.capture(
+                                        action_pre=action_pre,
+                                        attention_mask=attention_mask,
+                                        video_seq_len=video_seq_len,
+                                    )
+
+                        with self._nvtx_range("ActionPostDiT", enabled=nvtx_enabled):
+                            # Stage 3: post_dit — always eager (single linear, μs-level)
+                            pred_action = self.action_expert.post_dit(body_output, action_pre)
+
+                        with self._nvtx_range("CacheUpdate", enabled=nvtx_enabled):
+                            # Stage 4: cache update — now has correct 1024-dim body_output every step
+                            if action_expert_cache is not None and not (
+                                cache_decision is not None and cache_decision.should_reuse
+                            ):
+                                action_expert_cache.update(body_input, body_output)
+
+                        with self._nvtx_range("SchedulerStep", enabled=nvtx_enabled):
+                            # Stage 5: scheduler step
+                            latents_action = self.infer_action_scheduler.step(
+                                pred_action, step_delta_action, latents_action
+                            )
+
+            with self._nvtx_range("postprocess", enabled=nvtx_enabled):
+                self._log_action_expert_cache(action_expert_cache)
+                return {
+                    "action": latents_action[0].detach().to(device="cpu", dtype=torch.float32),
+                }
 
     @torch.inference_mode()
     def infer(

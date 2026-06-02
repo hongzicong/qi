@@ -15,6 +15,7 @@ import json
 import logging
 import time
 import os
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,21 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 register_default_resolvers()
 logger = get_logger(__name__)
+
+_PY_NVTX: Any = None
+_PY_NVTX_READY = False
+_NVTX_WARNED = False
+
+
+def _load_py_nvtx() -> Any:
+    global _PY_NVTX, _PY_NVTX_READY
+    if not _PY_NVTX_READY:
+        try:
+            _PY_NVTX = __import__("nvtx")
+        except Exception:
+            _PY_NVTX = None
+        _PY_NVTX_READY = True
+    return _PY_NVTX
 
 
 def parse_args() -> argparse.Namespace:
@@ -88,6 +104,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=8)
     parser.add_argument("--tiled", action="store_true")
     parser.add_argument("--no-cuda-graph", action="store_true", help="Disable CUDA Graph for action denoising (for baseline comparison).")
+    parser.add_argument(
+        "--infer-action-only",
+        action="store_true",
+        help=(
+            "Run action-only inference path (model.infer_action) for profiling. "
+            "In this mode, chunk conditioning image is not rolled forward."
+        ),
+    )
+    parser.add_argument(
+        "--nsys-cuda-profiler-per-chunk",
+        action="store_true",
+        help=(
+            "Wrap the whole multi-chunk rollout with a single cudaProfilerStart/Stop "
+            "so nsys --capture-range=cudaProfilerApi produces one report while "
+            "keeping per-chunk NVTX labels."
+        ),
+    )
+    parser.add_argument(
+        "--nsys-skip-first-chunk-capture",
+        action="store_true",
+        help=(
+            "When used with --nsys-cuda-profiler-per-chunk, delay cudaProfilerStart "
+            "until after chunk0, so report keeps chunks 1..N-1 while execution still "
+            "runs all chunks."
+        ),
+    )
     parser.add_argument("--torch-compile", action="store_true", help="Enable torch.compile on action expert inference (Inductor backend, default mode).")
 
     parser.add_argument("--cam-high", default=None)
@@ -96,6 +138,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state-json", default=None)
     parser.add_argument("--prompt", default="clean the table")
     return parser.parse_args()
+
+
+@contextmanager
+def maybe_nvtx_range(name: str, enabled: bool):
+    global _NVTX_WARNED
+    if not enabled:
+        yield
+        return
+    backend = None
+    token: Any = None
+    py_nvtx = _load_py_nvtx()
+    try:
+        if py_nvtx is not None:
+            token = py_nvtx.start_range(message=name)
+            backend = "nvtx"
+        else:
+            torch.cuda.nvtx.range_push(name)
+            backend = "torch"
+    except Exception as exc:
+        if not _NVTX_WARNED:
+            logger.warning("NVTX range emit failed once; continuing without NVTX ranges: %s", exc)
+            _NVTX_WARNED = True
+        backend = None
+    try:
+        yield
+    finally:
+        if backend == "nvtx":
+            try:
+                py_nvtx.end_range(token)
+            except Exception:
+                pass
+        elif backend == "torch":
+            try:
+                torch.cuda.nvtx.range_pop()
+            except Exception:
+                pass
 
 
 def default_num_video_frames(cfg: DictConfig) -> int:
@@ -232,72 +310,110 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
     rollout_actions: list[torch.Tensor] = []
     chunk_metrics: list[dict[str, Any]] = []
     current_input = input_image
+    cuda_device = isinstance(model.device, torch.device) and model.device.type == "cuda"
+    enable_chunk_nvtx = bool(cuda_device)
+    enable_chunk_profiler_api = bool(args.nsys_cuda_profiler_per_chunk and cuda_device)
+    skip_first_capture = bool(args.nsys_skip_first_chunk_capture)
 
-    for chunk_idx in range(num_chunks):
-        chunk_prefix = prefix if num_chunks == 1 else f"{prefix}_chunk{chunk_idx:02d}"
-        chunk_seed = None if args.seed is None else int(args.seed) + chunk_idx
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
+    if enable_chunk_profiler_api and not skip_first_capture:
+        logger.info("NSYS capture start: before chunk loop (includes chunk 00).")
+        torch.cuda.cudart().cudaProfilerStart()
+    profiler_started = bool(enable_chunk_profiler_api and not skip_first_capture)
+    try:
+        for chunk_idx in range(num_chunks):
+            if enable_chunk_profiler_api and skip_first_capture and (not profiler_started) and chunk_idx == 1:
+                logger.info("NSYS capture start: at chunk %02d (chunk 00 excluded).", chunk_idx)
+                torch.cuda.cudart().cudaProfilerStart()
+                profiler_started = True
+            chunk_prefix = prefix if num_chunks == 1 else f"{prefix}_chunk{chunk_idx:02d}"
+            chunk_seed = None if args.seed is None else int(args.seed) + chunk_idx
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            chunk_label = f"chunk {chunk_idx:02d}"
+            with maybe_nvtx_range(chunk_label, enabled=enable_chunk_nvtx):
+                if args.infer_action_only:
+                    pred = model.infer_action(
+                        prompt=prompt,
+                        input_image=current_input,
+                        action_horizon=action_horizon,
+                        proprio=proprio,
+                        context=context,
+                        context_mask=context_mask,
+                        text_cfg_scale=1.0,
+                        num_inference_steps=args.num_inference_steps,
+                        seed=chunk_seed,
+                        rand_device=args.rand_device,
+                        tiled=args.tiled,
+                        expert_cache=args.expert_cache,
+                        cuda_graph=not args.no_cuda_graph,
+                        expert_cache_reuse_steps=args.expert_cache_reuse_steps,
+                        expert_cache_warmup_steps=args.expert_cache_warmup_steps,
+                        expert_cache_cooldown_steps=args.expert_cache_cooldown_steps,
+                    )
+                else:
+                    pred = model.infer(
+                        prompt=prompt,
+                        input_image=current_input,
+                        num_frames=num_video_frames,
+                        action=None,
+                        action_horizon=action_horizon,
+                        proprio=proprio,
+                        context=context,
+                        context_mask=context_mask,
+                        text_cfg_scale=1.0,
+                        action_cfg_scale=1.0,
+                        num_inference_steps=args.num_inference_steps,
+                        seed=chunk_seed,
+                        rand_device=args.rand_device,
+                        tiled=args.tiled,
+                        expert_cache=args.expert_cache,
+                        cuda_graph=not args.no_cuda_graph,
+                        expert_cache_reuse_steps=args.expert_cache_reuse_steps,
+                        expert_cache_warmup_steps=args.expert_cache_warmup_steps,
+                        expert_cache_cooldown_steps=args.expert_cache_cooldown_steps,
+                        time_inference=True,
+                    )
+                torch.cuda.synchronize()
+            logger.info("Inference time (chunk %d): %.3f s", chunk_idx, time.perf_counter() - t0)
 
-        pred = model.infer(
-            prompt=prompt,
-            input_image=current_input,
-            num_frames=num_video_frames,
-            action=None,
-            action_horizon=action_horizon,
-            proprio=proprio,
-            context=context,
-            context_mask=context_mask,
-            text_cfg_scale=1.0,
-            action_cfg_scale=1.0,
-            num_inference_steps=args.num_inference_steps,
-            seed=chunk_seed,
-            rand_device=args.rand_device,
-            tiled=args.tiled,
-            expert_cache=args.expert_cache,
-            cuda_graph=not args.no_cuda_graph,
-            expert_cache_reuse_steps=args.expert_cache_reuse_steps,
-            expert_cache_warmup_steps=args.expert_cache_warmup_steps,
-            expert_cache_cooldown_steps=args.expert_cache_cooldown_steps,
-            time_inference=True,
-        )
+            save_image(current_input, output_dir / f"{chunk_prefix}_input.png")
+            pred_action_denorm = save_actions(
+                pred.get("action"),
+                output_dir=output_dir,
+                prefix=chunk_prefix,
+                processor=processor,
+                proprio=proprio,
+            )
+            if pred_action_denorm is not None:
+                rollout_actions.append(pred_action_denorm)
 
-        torch.cuda.synchronize()
-        logger.info("Inference time (chunk %d): %.3f s", chunk_idx, time.perf_counter() - t0)
+            if not args.infer_action_only:
+                pred_frames = pred["video"]
+                save_mp4(pred_frames, str(output_dir / f"{chunk_prefix}_pred.mp4"), fps=args.fps)
+                rollout_frames.extend(pred_frames if chunk_idx == 0 else pred_frames[1:])
+                current_input = pil_frame_to_input_image(pred_frames[-1], device=model.device, dtype=model.torch_dtype)
+            chunk_metrics.append(
+                {
+                    "chunk_index": chunk_idx,
+                    "seed": chunk_seed,
+                    "video_path": None if args.infer_action_only else f"{chunk_prefix}_pred.mp4",
+                    "input_path": f"{chunk_prefix}_input.png",
+                    "pred_actions_path": f"{chunk_prefix}_pred_actions.json",
+                }
+            )
+    finally:
+        if profiler_started:
+            logger.info("NSYS capture stop: after chunk loop.")
+            torch.cuda.cudart().cudaProfilerStop()
 
-        pred_frames = pred["video"]
-        save_mp4(pred_frames, str(output_dir / f"{chunk_prefix}_pred.mp4"), fps=args.fps)
-        save_image(current_input, output_dir / f"{chunk_prefix}_input.png")
-        pred_action_denorm = save_actions(
-            pred.get("action"),
-            output_dir=output_dir,
-            prefix=chunk_prefix,
-            processor=processor,
-            proprio=proprio,
-        )
-        if pred_action_denorm is not None:
-            rollout_actions.append(pred_action_denorm)
-
-        rollout_frames.extend(pred_frames if chunk_idx == 0 else pred_frames[1:])
-        current_input = pil_frame_to_input_image(pred_frames[-1], device=model.device, dtype=model.torch_dtype)
-        chunk_metrics.append(
-            {
-                "chunk_index": chunk_idx,
-                "seed": chunk_seed,
-                "video_path": f"{chunk_prefix}_pred.mp4",
-                "input_path": f"{chunk_prefix}_input.png",
-                "pred_actions_path": f"{chunk_prefix}_pred_actions.json",
-            }
-        )
-
-    if num_chunks > 1:
+    if num_chunks > 1 and not args.infer_action_only:
         save_mp4(rollout_frames, str(output_dir / f"{prefix}_rollout_pred.mp4"), fps=args.fps)
-        if rollout_actions:
-            action_rollout = torch.cat(rollout_actions, dim=0)
-            action_np = action_rollout.detach().cpu().numpy().astype(np.float32)
-            np.save(output_dir / f"{prefix}_rollout_pred_actions.npy", action_np)
-            with open(output_dir / f"{prefix}_rollout_pred_actions.json", "w", encoding="utf-8") as file:
-                json.dump({"action": action_np.tolist()}, file, ensure_ascii=False, indent=2)
+    if num_chunks > 1 and rollout_actions:
+        action_rollout = torch.cat(rollout_actions, dim=0)
+        action_np = action_rollout.detach().cpu().numpy().astype(np.float32)
+        np.save(output_dir / f"{prefix}_rollout_pred_actions.npy", action_np)
+        with open(output_dir / f"{prefix}_rollout_pred_actions.json", "w", encoding="utf-8") as file:
+            json.dump({"action": action_np.tolist()}, file, ensure_ascii=False, indent=2)
 
     metrics = {
         "source": "files",
