@@ -26,10 +26,6 @@ def dtype_from_mixed_precision(mixed_precision: str) -> torch.dtype:
 def load_config(args: argparse.Namespace) -> DictConfig:
     config_dir = str(Path(args.config_dir).resolve())
     overrides = [f"task={args.task}", f"mixed_precision={args.mixed_precision}"]
-    if getattr(args, "module_cuda_graph_off", False):
-        overrides.append("model.module_cuda_graph=false")
-    if getattr(args, "module_torch_compile", False):
-        overrides.append("model.module_torch_compile=true")
     with initialize_config_dir(config_dir=config_dir, version_base="1.3"):
         cfg = compose(config_name="train", overrides=overrides)
 

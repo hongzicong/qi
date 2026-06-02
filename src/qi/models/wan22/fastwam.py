@@ -507,8 +507,6 @@ class FastWAM(torch.nn.Module):
         action_num_train_timesteps: int = 1000,
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
-        module_cuda_graph: bool = True,
-        module_torch_compile: bool = False,
     ):
         super().__init__()
         self.video_expert = video_expert
@@ -555,8 +553,7 @@ class FastWAM(torch.nn.Module):
         self.torch_dtype = torch_dtype
         self.loss_lambda_video = float(loss_lambda_video)
         self.loss_lambda_action = float(loss_lambda_action)
-        self._module_graphs_enabled = bool(module_cuda_graph)
-        self._module_torch_compile_enabled = bool(module_torch_compile)
+        self._module_torch_compile_enabled = False
         
         # CUDA Graph manager (wraps MoT body only)
         self._graph_mgr: Optional[CUDAGraphManager] = None
@@ -591,8 +588,6 @@ class FastWAM(torch.nn.Module):
         action_num_train_timesteps: int = 1000,
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
-        module_cuda_graph: bool = True,
-        module_torch_compile: bool = False,
     ):
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required for FastWAM.from_wan22_pretrained().")
@@ -650,8 +645,6 @@ class FastWAM(torch.nn.Module):
             action_num_train_timesteps=action_num_train_timesteps,
             loss_lambda_video=loss_lambda_video,
             loss_lambda_action=loss_lambda_action,
-            module_cuda_graph=module_cuda_graph,
-            module_torch_compile=module_torch_compile,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -1547,13 +1540,14 @@ class FastWAM(torch.nn.Module):
         if torch_compile:
             body_fn = torch.compile(body_fn)
         self._graph_mgr = CUDAGraphManager(body_fn)
-        self._setup_module_graph_mgrs()
+        self._setup_module_graph_mgrs(torch_compile=torch_compile)
 
-    def _setup_module_graph_mgrs(self) -> None:
+    def _setup_module_graph_mgrs(self, torch_compile: bool = False) -> None:
+        self._module_torch_compile_enabled = bool(torch_compile)
         vae_encode_fn = self.vae.encode
         prefill_fn = self.mot.prefill_video_cache
 
-        if self._module_torch_compile_enabled:
+        if torch_compile:
             try:
                 vae_encode_fn = torch.compile(vae_encode_fn)
             except Exception as exc:
@@ -1629,7 +1623,7 @@ class FastWAM(torch.nn.Module):
         ).to(device=self.device, dtype=self.torch_dtype)
 
         input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
-        module_cuda_graph = bool(cuda_graph and self._module_graphs_enabled and input_image.is_cuda)
+        module_cuda_graph = bool(cuda_graph and input_image.is_cuda)
         module_compile_only = bool(
             (not module_cuda_graph)
             and self._module_torch_compile_enabled

@@ -88,17 +88,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=8)
     parser.add_argument("--tiled", action="store_true")
     parser.add_argument("--no-cuda-graph", action="store_true", help="Disable CUDA Graph for action denoising (for baseline comparison).")
-    parser.add_argument(
-        "--module-cuda-graph-off",
-        action="store_true",
-        help="Disable module CUDA graph (VAE encode + prefill) while keeping action CUDA graph behavior unchanged.",
-    )
     parser.add_argument("--torch-compile", action="store_true", help="Enable torch.compile on action expert inference (Inductor backend, default mode).")
-    parser.add_argument(
-        "--module-torch-compile",
-        action="store_true",
-        help="Enable torch.compile on VAE encode and prefill module paths (shared switch).",
-    )
 
     parser.add_argument("--cam-high", default=None)
     parser.add_argument("--cam-left-wrist", default=None)
@@ -341,13 +331,10 @@ def run() -> None:
         import logging as _logging
         _logging.getLogger("torch._dynamo").setLevel(_logging.WARNING)
         logger.info("torch.compile enabled on MoT body forward (Inductor, default mode)")
-    if args.module_torch_compile:
-        logger.info("torch.compile enabled on module paths (VAE encode + prefill)")
-
     if not args.no_cuda_graph or args.torch_compile:
         model._setup_graph_mgr(torch_compile=args.torch_compile)
         if not args.no_cuda_graph:
-            logger.info("CUDA Graph enabled (wraps MoT body only)")
+            logger.info("CUDA Graph enabled (wraps VAE encode, prefill, and MoT body)")
         else:
             logger.info("CUDA Graph disabled, torch.compile only")
 
