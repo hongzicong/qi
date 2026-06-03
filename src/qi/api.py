@@ -8,6 +8,11 @@ from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
+from qi.quantization import (
+    checkpoint_is_quantized,
+    load_checkpoint_payload,
+    prepare_model_for_quantized_checkpoint,
+)
 from qi.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -24,9 +29,9 @@ def dtype_from_mixed_precision(mixed_precision: str) -> torch.dtype:
 
 
 def load_config(
-        config_dir: str, 
-        task: str, 
-        mixed_precision: str, 
+        config_dir: str,
+        task: str,
+        mixed_precision: str,
         dataset_stats: str) -> DictConfig:
     config_dir = str(Path(config_dir).resolve())
     overrides = [f"task={task}", f"mixed_precision={mixed_precision}"]
@@ -57,6 +62,17 @@ def load_model(
     model_dtype = dtype_from_mixed_precision(mixed_precision)
     model = instantiate(cfg.model, model_dtype=model_dtype, device=device)
     model.cfg = cfg
+
+    payload = load_checkpoint_payload(ckpt)
+    if checkpoint_is_quantized(payload):
+        quant_cfg = prepare_model_for_quantized_checkpoint(model, payload)
+        logger.info(
+            "Detected quantized checkpoint: algo=%s bits=%s backend=%s.",
+            quant_cfg.algo,
+            quant_cfg.bits,
+            quant_cfg.backend,
+        )
+
     payload = model.load_checkpoint(ckpt)
     model.eval()
     logger.info("Loaded checkpoint %s with keys %s.", ckpt, sorted(payload.keys()))

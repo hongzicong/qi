@@ -4,3 +4,6 @@
 [submodule "tests/third_party/LIBERO"]
 	path = tests/third_party/LIBERO
 	url = https://github.com/Lifelong-Robot-Learning/LIBERO.git
+[submodule "third_party/cutlass"]
+	path = third_party/cutlass
+	url = https://github.com/NVIDIA/cutlass.git
