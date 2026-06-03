@@ -62,6 +62,31 @@ def load_int8_w8a8_ops(required: bool = True) -> ModuleType | None:
 class Int8W8A8Backend:
     def __init__(self) -> None:
         self._ops = load_int8_w8a8_ops(required=False)
+        self._quant_workspace: dict[tuple[int, int, int, int], tuple[torch.Tensor, torch.Tensor]] = {}
+
+    def clear_workspace_cache(self) -> None:
+        self._quant_workspace.clear()
+
+    def _get_quant_workspace(
+        self,
+        *,
+        device: torch.device,
+        m: int,
+        k: int,
+        stream: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        device_index = device.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        key = (int(device_index), int(m), int(k), int(stream))
+        workspace = self._quant_workspace.get(key)
+        if workspace is None:
+            workspace = (
+                torch.empty((m, k), dtype=torch.int8, device=device),
+                torch.empty((m,), dtype=torch.float32, device=device),
+            )
+            self._quant_workspace[key] = workspace
+        return workspace
 
     def linear(
         self,
@@ -133,10 +158,14 @@ class Int8W8A8Backend:
         qweight_2d = qweight.contiguous()
         weight_scales = weight_scales.contiguous().float()
         m = int(x_2d.shape[0])
-        x_int8 = torch.empty((m, in_features), dtype=torch.int8, device=x.device)
-        act_scales = torch.empty((m,), dtype=torch.float32, device=x.device)
-
         stream = torch.cuda.current_stream(x.device).cuda_stream
+        x_int8, act_scales = self._get_quant_workspace(
+            device=x.device,
+            m=m,
+            k=in_features,
+            stream=int(stream),
+        )
+
         self._ops.quantize_int8_rowwise(
             x_2d.data_ptr(),
             x_int8.data_ptr(),
@@ -147,20 +176,52 @@ class Int8W8A8Backend:
         )
 
         out = torch.empty((m, out_features), dtype=torch.bfloat16, device=x.device)
-        rc = self._ops.cutlass_int8_rowwise_bf16out(
-            x_int8.data_ptr(),
-            qweight_2d.data_ptr(),
-            act_scales.data_ptr(),
-            weight_scales.data_ptr(),
-            out.data_ptr(),
-            m,
-            out_features,
-            in_features,
-            stream,
-        )
+        bias_kernel = None
+        if bias is not None:
+            if bias.numel() != out_features:
+                raise ValueError(f"Expected bias with {out_features} values, got {bias.numel()}.")
+            bias_kernel = bias.reshape(-1)
+            if (
+                not bias_kernel.is_cuda
+                or bias_kernel.device != x.device
+                or bias_kernel.dtype != torch.bfloat16
+                or not bias_kernel.is_contiguous()
+            ):
+                bias_kernel = bias_kernel.to(device=x.device, dtype=torch.bfloat16).contiguous()
+
+        bias_op = getattr(self._ops, "cutlass_int8_rowwise_bf16out_bias", None)
+        if bias_kernel is not None and bias_op is not None:
+            rc = bias_op(
+                x_int8.data_ptr(),
+                qweight_2d.data_ptr(),
+                act_scales.data_ptr(),
+                weight_scales.data_ptr(),
+                bias_kernel.data_ptr(),
+                out.data_ptr(),
+                m,
+                out_features,
+                in_features,
+                stream,
+            )
+        else:
+            rc = self._ops.cutlass_int8_rowwise_bf16out(
+                x_int8.data_ptr(),
+                qweight_2d.data_ptr(),
+                act_scales.data_ptr(),
+                weight_scales.data_ptr(),
+                out.data_ptr(),
+                m,
+                out_features,
+                in_features,
+                stream,
+            )
+            if int(rc) != 0:
+                raise RuntimeError(f"INT8 W8A8 CUTLASS GEMM failed with status {int(rc)}.")
+            if bias_kernel is not None:
+                out = out + bias_kernel.to(device=x.device, dtype=out.dtype)
+            return out.reshape(*x.shape[:-1], out_features).to(out_dtype)
+
         if int(rc) != 0:
             raise RuntimeError(f"INT8 W8A8 CUTLASS GEMM failed with status {int(rc)}.")
 
-        if bias is not None:
-            out = out + bias.to(device=x.device, dtype=out.dtype)
         return out.reshape(*x.shape[:-1], out_features).to(out_dtype)

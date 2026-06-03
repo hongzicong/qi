@@ -1,7 +1,6 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
@@ -15,7 +14,7 @@
 
 namespace qi {
 namespace quantization {
-namespace cutlass_int8_sm8x {
+namespace cutlass_int8_sm8x_t32x128 {
 
 using namespace cute;
 
@@ -34,8 +33,8 @@ constexpr int AlignmentC = 8;
 
 using ArchTag = cutlass::arch::Sm80;
 using OperatorClass = cutlass::arch::OpClassTensorOp;
-using ThreadblockShape = cutlass::gemm::GemmShape<128, 128, 64>;
-using WarpShape = cutlass::gemm::GemmShape<64, 64, 64>;
+using ThreadblockShape = cutlass::gemm::GemmShape<32, 128, 64>;
+using WarpShape = cutlass::gemm::GemmShape<16, 64, 64>;
 using InstructionShape = cutlass::gemm::GemmShape<16, 8, 32>;
 constexpr int NumStages = 4;
 constexpr int EVTEpilogueStages = 1;
@@ -151,7 +150,7 @@ static int run(
     auto st = gemm.can_implement(args);
     if (st != cutlass::Status::kSuccess) {
         std::fprintf(stderr,
-                     "[qi_cutlass_int8_sm8x] can_implement failed: M=%d N=%d K=%d code=%d\n",
+                     "[qi_cutlass_int8_sm8x_t32x128] can_implement failed: M=%d N=%d K=%d code=%d\n",
                      M, N, K, static_cast<int>(st));
         return static_cast<int>(st) | 0x10000;
     }
@@ -172,7 +171,7 @@ static int run(
     st = gemm.initialize(args, ws_ptr, stream);
     if (st != cutlass::Status::kSuccess) {
         std::fprintf(stderr,
-                     "[qi_cutlass_int8_sm8x] init failed: M=%d N=%d K=%d code=%d\n",
+                     "[qi_cutlass_int8_sm8x_t32x128] init failed: M=%d N=%d K=%d code=%d\n",
                      M, N, K, static_cast<int>(st));
         return static_cast<int>(st) | 0x20000;
     }
@@ -235,7 +234,7 @@ static int run_bias(
     auto st = gemm.can_implement(args);
     if (st != cutlass::Status::kSuccess) {
         std::fprintf(stderr,
-                     "[qi_cutlass_int8_sm8x_bias] can_implement failed: M=%d N=%d K=%d code=%d\n",
+                     "[qi_cutlass_int8_sm8x_t32x128_bias] can_implement failed: M=%d N=%d K=%d code=%d\n",
                      M, N, K, static_cast<int>(st));
         return static_cast<int>(st) | 0x10000;
     }
@@ -256,7 +255,7 @@ static int run_bias(
     st = gemm.initialize(args, ws_ptr, stream);
     if (st != cutlass::Status::kSuccess) {
         std::fprintf(stderr,
-                     "[qi_cutlass_int8_sm8x_bias] init failed: M=%d N=%d K=%d code=%d\n",
+                     "[qi_cutlass_int8_sm8x_t32x128_bias] init failed: M=%d N=%d K=%d code=%d\n",
                      M, N, K, static_cast<int>(st));
         return static_cast<int>(st) | 0x20000;
     }
@@ -265,73 +264,11 @@ static int run_bias(
     return (st == cutlass::Status::kSuccess) ? 0 : (static_cast<int>(st) | 0x30000);
 }
 
-}  // namespace cutlass_int8_sm8x
+}  // namespace cutlass_int8_sm8x_t32x128
 }  // namespace quantization
 }  // namespace qi
 
-extern "C" int qi_cutlass_int8_rowwise_bf16out_t64x128(
-    void const* A, void const* B,
-    void const* act_scale, void const* weight_scale,
-    void* D, int M, int N, int K, cudaStream_t stream);
-
-extern "C" int qi_cutlass_int8_rowwise_bf16out_bias_t64x128(
-    void const* A, void const* B,
-    void const* act_scale, void const* weight_scale,
-    void const* bias, void* D, int M, int N, int K, cudaStream_t stream);
-
-extern "C" int qi_cutlass_int8_rowwise_bf16out_t64x256(
-    void const* A, void const* B,
-    void const* act_scale, void const* weight_scale,
-    void* D, int M, int N, int K, cudaStream_t stream);
-extern "C" int qi_cutlass_int8_rowwise_bf16out_bias_t64x256(
-    void const* A, void const* B,
-    void const* act_scale, void const* weight_scale,
-    void const* bias, void* D, int M, int N, int K, cudaStream_t stream);
-
 extern "C" int qi_cutlass_int8_rowwise_bf16out_t32x128(
-    void const* A, void const* B,
-    void const* act_scale, void const* weight_scale,
-    void* D, int M, int N, int K, cudaStream_t stream);
-extern "C" int qi_cutlass_int8_rowwise_bf16out_bias_t32x128(
-    void const* A, void const* B,
-    void const* act_scale, void const* weight_scale,
-    void const* bias, void* D, int M, int N, int K, cudaStream_t stream);
-
-extern "C" int qi_cutlass_int8_rowwise_bf16out_t128x64(
-    void const* A, void const* B,
-    void const* act_scale, void const* weight_scale,
-    void* D, int M, int N, int K, cudaStream_t stream);
-extern "C" int qi_cutlass_int8_rowwise_bf16out_bias_t128x64(
-    void const* A, void const* B,
-    void const* act_scale, void const* weight_scale,
-    void const* bias, void* D, int M, int N, int K, cudaStream_t stream);
-
-static inline bool qi_aligned_int8_tile_shape(int N, int K) {
-    return (N >= 64) && ((N % 64) == 0) && ((K % 64) == 0);
-}
-
-static inline bool qi_prefer_t64x256_for_shape(int M, int N, int K) {
-    return (M <= 128) && (N >= 8192) && ((N % 256) == 0) && qi_aligned_int8_tile_shape(N, K);
-}
-
-
-static inline bool qi_prefer_t32x128_for_shape(int M, int N, int K) {
-    return (M <= 64) && (N <= 4096) && qi_aligned_int8_tile_shape(N, K);
-}
-
-static inline bool qi_prefer_t64x128_for_shape(int M, int N, int K) {
-    return qi_aligned_int8_tile_shape(N, K) && ((M <= 64) || (N > 2048 && N <= 4096));
-}
-
-static bool qi_tile_dispatch_enabled() {
-    static const int v = []() {
-        const char* env = std::getenv("QI_INT8_W8A8_NO_TILE_DISPATCH");
-        return (env && env[0] == '1') ? 0 : 1;
-    }();
-    return v != 0;
-}
-
-extern "C" int qi_cutlass_int8_rowwise_bf16out(
     void const* A,
     void const* B,
     void const* act_scale,
@@ -342,25 +279,11 @@ extern "C" int qi_cutlass_int8_rowwise_bf16out(
     int K,
     cudaStream_t stream)
 {
-    if (qi_tile_dispatch_enabled()) {
-        if (qi_prefer_t64x256_for_shape(M, N, K)) {
-            return qi_cutlass_int8_rowwise_bf16out_t64x256(
-                A, B, act_scale, weight_scale, D, M, N, K, stream);
-        }
-        if (qi_prefer_t32x128_for_shape(M, N, K)) {
-            return qi_cutlass_int8_rowwise_bf16out_t32x128(
-                A, B, act_scale, weight_scale, D, M, N, K, stream);
-        }
-        if (qi_prefer_t64x128_for_shape(M, N, K)) {
-            return qi_cutlass_int8_rowwise_bf16out_t64x128(
-                A, B, act_scale, weight_scale, D, M, N, K, stream);
-        }
-    }
-    return qi::quantization::cutlass_int8_sm8x::run(
+    return qi::quantization::cutlass_int8_sm8x_t32x128::run(
         A, B, act_scale, weight_scale, D, M, N, K, stream);
 }
 
-extern "C" int qi_cutlass_int8_rowwise_bf16out_bias(
+extern "C" int qi_cutlass_int8_rowwise_bf16out_bias_t32x128(
     void const* A,
     void const* B,
     void const* act_scale,
@@ -373,23 +296,9 @@ extern "C" int qi_cutlass_int8_rowwise_bf16out_bias(
     cudaStream_t stream)
 {
     if (bias == nullptr) {
-        return qi_cutlass_int8_rowwise_bf16out(
+        return qi_cutlass_int8_rowwise_bf16out_t32x128(
             A, B, act_scale, weight_scale, D, M, N, K, stream);
     }
-    if (qi_tile_dispatch_enabled()) {
-        if (qi_prefer_t64x256_for_shape(M, N, K)) {
-            return qi_cutlass_int8_rowwise_bf16out_bias_t64x256(
-                A, B, act_scale, weight_scale, bias, D, M, N, K, stream);
-        }
-        if (qi_prefer_t32x128_for_shape(M, N, K)) {
-            return qi_cutlass_int8_rowwise_bf16out_bias_t32x128(
-                A, B, act_scale, weight_scale, bias, D, M, N, K, stream);
-        }
-        if (qi_prefer_t64x128_for_shape(M, N, K)) {
-            return qi_cutlass_int8_rowwise_bf16out_bias_t64x128(
-                A, B, act_scale, weight_scale, bias, D, M, N, K, stream);
-        }
-    }
-    return qi::quantization::cutlass_int8_sm8x::run_bias(
+    return qi::quantization::cutlass_int8_sm8x_t32x128::run_bias(
         A, B, act_scale, weight_scale, bias, D, M, N, K, stream);
 }

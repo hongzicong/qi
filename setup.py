@@ -27,7 +27,8 @@ def _build_int8_extension():
     if build_mode in {"0", "false", "off", "no"}:
         return [], {}
 
-    cutlass_dir = Path(os.environ.get("QI_CUTLASS_DIR", ROOT / "third_party" / "cutlass")).resolve()
+    cutlass_env = os.environ.get("QI_CUTLASS_DIR")
+    cutlass_dir = Path(cutlass_env).resolve() if cutlass_env else (ROOT / "third_party" / "cutlass").resolve()
     cutlass_include = cutlass_dir / "include"
     cutlass_tools = cutlass_dir / "tools" / "util" / "include"
     missing_cutlass = not (cutlass_include / "cutlass" / "cutlass.h").exists()
@@ -57,6 +58,9 @@ def _build_int8_extension():
         src_dir / "quantize_int8.cu",
         src_dir / "cutlass_int8_rowwise.cu",
         src_dir / "cutlass_int8_rowwise_t64x128.cu",
+        src_dir / "cutlass_int8_rowwise_t64x256.cu",
+        src_dir / "cutlass_int8_rowwise_t32x128.cu",
+        src_dir / "cutlass_int8_rowwise_t128x64.cu",
     ]
     try:
         ext = CUDAExtension(
