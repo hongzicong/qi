@@ -3,16 +3,16 @@
 # Paths in this file are resolved relative to this config file by the new
 # FastWAMPolicyConfig loader.
 
-fastwam:
-  ckpt: "/home/agilex/World_Action_Model/physical_WM/checkpoints/pick_1_cup_aug_ego/step_020000.pt"                                                                  # model weights to load (step_xxxxxx.pt)
-  dataset_stats: "/home/agilex/World_Action_Model/physical_WM/checkpoints/pick_1_cup_aug_ego/dataset_stats.json"                                                  # state/action normalization stats from training
+wam:
+  ckpt: "../checkpoints/pick_1_cup_aug_ego/step_020000.pt"                                        # model weights to load (step_xxxxxx.pt). Use relative paths instead of absolute paths everywhere.
+  dataset_stats: "../checkpoints/pick_1_cup_aug_ego/dataset_stats.json"                           # state/action normalization stats from training
   task: "real_cleaning_uncond_3cam_384_1e-4"                                                      # Hydra task name (used only if train_config is null)
   config_dir: "."                                                                                 # Hydra config root, relative to this yaml
-  train_config: "/home/agilex/World_Action_Model/physical_WM/checkpoints/pick_1_cup_aug_ego/config.yaml"                                                             # saved training config (14-dim/dual, must match the loaded ckpt); if set, bypasses Hydra compose
+  train_config: "../checkpoints/pick_1_cup_aug_ego/config.yaml"                                                             # saved training config (14-dim/dual, must match the loaded ckpt); if set, bypasses Hydra compose
   device: "cuda:0"                                                                                # device for model inference
   mixed_precision: "bf16"                                                                         # model dtype: "no" | "fp16" | "bf16"
   prompt: "With the right arm, pick up the orange cup and place it into the white bowl. The left arm stays still."    # text instruction; sha256 must match a file in context_cache_dir
-  context_cache_dir: "/home/agilex/World_Action_Model/physical_WM/data/text_embeds_cache/pick_1_cup"                                         # dir of precomputed T5 embeddings (<sha256>.t5_lenN.<enc>.pt)
+  context_cache_dir: "../data/text_embeds_cache/pick_1_cup"                                         # dir of precomputed T5 embeddings (<sha256>.t5_lenN.<enc>.pt)
   use_text_encoder: false                                                                         # false=read from cache; true=run T5 inline (slow + needs T5 in VRAM)
   action_horizon: 32                                                                              # # of future actions predicted per inference call (chunk length)
   num_inference_steps: 10                                                                         # flow-matching denoising steps; smaller = faster, lower quality
@@ -22,7 +22,7 @@ fastwam:
 policy_server:
   host: "127.0.0.1"                                                                               # RPC server bind address
   port: 8765                                                                                      # RPC server port (runtime must match)
-  authkey: "fastwam"                                                                              # shared secret between server and runtime
+  authkey: "wam"                                                                              # shared secret between server and runtime
 
 runtime:
   arm_mode: "dual"                                                                               # "dual" (14-dim, both arms) | "right" | "left" (7-dim single arm). MUST match the served checkpoint's action dim. CLI: --arm-mode/--arm-side override this.
