@@ -1,4 +1,9 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-checkpoints/
+/build/
+/checkpoints/
+/src/qi.egg-info/
+/src/qi/.quantization_nobody_orig/
+/src/qi/quantization/*.so
+/src/qi/quantization/*.cpython-*.so

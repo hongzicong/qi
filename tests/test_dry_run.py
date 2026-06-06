@@ -31,7 +31,7 @@ from qi.utils.config_resolvers import register_default_resolvers
 from qi.utils.image_utils import load_rgb_image, load_state_vector, pil_frame_to_input_image, preprocess_real_images, save_image
 from qi.utils.logging_config import get_logger, setup_logging
 from qi.utils.video_utils import save_mp4
-from qi.api import load_model, load_config
+from qi.api import load_model
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -440,25 +440,23 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
 def run() -> None:
     args = parse_args()
     setup_logging(log_level=logging.INFO)
-    cfg = load_config(args)
-    model = load_model(args, cfg)
 
-    if args.torch_compile:
-        import logging as _logging
-        _logging.getLogger("torch._dynamo").setLevel(_logging.WARNING)
-        logger.info("torch.compile enabled on MoT body forward (Inductor, default mode)")
-    if not args.no_cuda_graph or args.torch_compile:
-        model._setup_graph_mgr(torch_compile=args.torch_compile)
-        if not args.no_cuda_graph:
-            logger.info("CUDA Graph enabled (wraps VAE encode, prefill, and MoT body)")
-        else:
-            logger.info("CUDA Graph disabled, torch.compile only")
+    model = load_model(
+        ckpt=args.ckpt,
+        device=args.device,
+        mixed_precision=args.mixed_precision,
+        config_dir=args.config_dir,
+        task=args.task,
+        dataset_stats=args.dataset_stats,
+        torch_compile=args.torch_compile,
+        no_cuda_graph=args.no_cuda_graph,
+    )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     prefix = args.prefix or "snapshot"
 
-    run_file_source(args, cfg, model, output_dir, prefix)
+    run_file_source(args, model.cfg, model, output_dir, prefix)
 
 
 if __name__ == "__main__":
