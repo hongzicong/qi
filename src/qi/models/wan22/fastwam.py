@@ -1634,6 +1634,7 @@ class FastWAM(torch.nn.Module):
         expert_cache_warmup_steps: int = 1,
         expert_cache_cooldown_steps: int = 1,
         cuda_graph: bool = True,
+        return_on_device: bool = False,
     ) -> dict[str, Any]:
         self.eval()
         nvtx_enabled = bool(
@@ -1934,6 +1935,13 @@ class FastWAM(torch.nn.Module):
 
             with self._nvtx_range("postprocess", enabled=nvtx_enabled):
                 self._log_action_expert_cache(action_expert_cache)
+                # When `return_on_device=True`, skip the implicit GPU->CPU sync at the chunk
+                # boundary so the caller can pipeline the D2H copy on its own stream and let
+                # the next chunk start launching kernels immediately.
+                if return_on_device:
+                    return {
+                        "action": latents_action[0].detach(),
+                    }
                 return {
                     "action": latents_action[0].detach().to(device="cpu", dtype=torch.float32),
                 }

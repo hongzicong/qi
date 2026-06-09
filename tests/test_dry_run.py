@@ -15,6 +15,7 @@ import json
 import logging
 import time
 import os
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -131,6 +132,23 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--torch-compile", action="store_true", help="Enable torch.compile on action expert inference (Inductor backend, default mode).")
+    parser.add_argument(
+        "--async-save",
+        action="store_true",
+        help=(
+            "Pipeline chunks: drop per-chunk torch.cuda.synchronize() calls, return action "
+            "tensors on-device, and offload save_image/save_actions to a background thread. "
+            "Eliminates the inter-chunk GPU bubble. infer_action_only mode only."
+        ),
+    )
+    parser.add_argument(
+        "--per-chunk-timing",
+        action="store_true",
+        help=(
+            "Force a torch.cuda.synchronize() around every chunk to log its wall-clock time. "
+            "Default: off (the host-side bubble it introduces is what we are trying to hide)."
+        ),
+    )
 
     parser.add_argument("--cam-high", default=None)
     parser.add_argument("--cam-left-wrist", default=None)
@@ -319,6 +337,57 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
         logger.info("NSYS capture start: before chunk loop (includes chunk 00).")
         torch.cuda.cudart().cudaProfilerStart()
     profiler_started = bool(enable_chunk_profiler_api and not skip_first_capture)
+
+    # --- Async-save / pipeline mode -------------------------------------------------
+    # When `--async-save` is set we (1) drop the per-chunk torch.cuda.synchronize()
+    # calls so the host can keep launching kernels for chunk N+1 while chunk N is
+    # still running on the GPU, (2) ask `infer_action` to return its prediction on
+    # the GPU instead of doing a blocking D2H, and (3) hand the actual file IO
+    # (PNG / NPY / JSON) off to a background thread so `save_image` / `save_actions`
+    # never stall the main loop.  The background thread is also responsible for the
+    # final D2H copy (cheap once the chunk's denoise has finished).  This collapses
+    # the inter-chunk bubble that nsys shows between chunks.
+    async_save = bool(args.async_save and cuda_device)
+    if args.async_save and not args.infer_action_only:
+        # `infer` returns a video tensor (and pil_frame_to_input_image consumes the
+        # last frame to roll the next chunk's conditioning forward), which has a
+        # data dependency we cannot pipeline trivially. Disable the optimisation
+        # rather than silently produce wrong outputs.
+        logger.warning("--async-save is currently only supported with --infer-action-only; ignoring.")
+        async_save = False
+    per_chunk_timing = bool(args.per_chunk_timing or not async_save)
+
+    save_executor: ThreadPoolExecutor | None = None
+    pending_saves: list[Future[Any]] = []
+    if async_save:
+        save_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chunk-save")
+
+    def _save_chunk_outputs(
+        chunk_idx_local: int,
+        chunk_prefix_local: str,
+        input_image_cpu: torch.Tensor,
+        action_tensor: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        # Runs in the background thread. `input_image_cpu` is already on CPU; the
+        # action tensor may be on GPU (when async_save=True we deliberately delayed
+        # the D2H).  Calling `.cpu()` here blocks this worker thread but not the
+        # main loop, and CUDA serialises it correctly behind the chunk's denoise.
+        save_image(input_image_cpu, output_dir / f"{chunk_prefix_local}_input.png")
+        return save_actions(
+            action_tensor,
+            output_dir=output_dir,
+            prefix=chunk_prefix_local,
+            processor=processor,
+            proprio=proprio,
+        )
+
+    # In infer_action_only the input image is fixed across chunks, so cache the CPU
+    # copy once to keep `_save_chunk_outputs` free of GPU sync.
+    cached_input_cpu: torch.Tensor | None = None
+    if async_save:
+        cached_input_cpu = current_input.detach().to("cpu")
+    # ---------------------------------------------------------------------------
+
     try:
         for chunk_idx in range(num_chunks):
             if enable_chunk_profiler_api and skip_first_capture and (not profiler_started) and chunk_idx == 1:
@@ -327,7 +396,8 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
                 profiler_started = True
             chunk_prefix = prefix if num_chunks == 1 else f"{prefix}_chunk{chunk_idx:02d}"
             chunk_seed = None if args.seed is None else int(args.seed) + chunk_idx
-            torch.cuda.synchronize()
+            if per_chunk_timing:
+                torch.cuda.synchronize()
             t0 = time.perf_counter()
             chunk_label = f"chunk {chunk_idx:02d}"
             with maybe_nvtx_range(chunk_label, enabled=enable_chunk_nvtx):
@@ -349,6 +419,7 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
                         expert_cache_reuse_steps=args.expert_cache_reuse_steps,
                         expert_cache_warmup_steps=args.expert_cache_warmup_steps,
                         expert_cache_cooldown_steps=args.expert_cache_cooldown_steps,
+                        return_on_device=async_save,
                     )
                 else:
                     pred = model.infer(
@@ -373,17 +444,32 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
                         expert_cache_cooldown_steps=args.expert_cache_cooldown_steps,
                         time_inference=True,
                     )
-                torch.cuda.synchronize()
-            logger.info("Inference time (chunk %d): %.3f s", chunk_idx, time.perf_counter() - t0)
+                if per_chunk_timing:
+                    torch.cuda.synchronize()
+            if per_chunk_timing:
+                logger.info("Inference time (chunk %d): %.3f s", chunk_idx, time.perf_counter() - t0)
 
-            save_image(current_input, output_dir / f"{chunk_prefix}_input.png")
-            pred_action_denorm = save_actions(
-                pred.get("action"),
-                output_dir=output_dir,
-                prefix=chunk_prefix,
-                processor=processor,
-                proprio=proprio,
-            )
+            if async_save and save_executor is not None:
+                assert cached_input_cpu is not None
+                pending_saves.append(
+                    save_executor.submit(
+                        _save_chunk_outputs,
+                        chunk_idx,
+                        chunk_prefix,
+                        cached_input_cpu,
+                        pred.get("action"),
+                    )
+                )
+                pred_action_denorm = None
+            else:
+                save_image(current_input, output_dir / f"{chunk_prefix}_input.png")
+                pred_action_denorm = save_actions(
+                    pred.get("action"),
+                    output_dir=output_dir,
+                    prefix=chunk_prefix,
+                    processor=processor,
+                    proprio=proprio,
+                )
             if pred_action_denorm is not None:
                 rollout_actions.append(pred_action_denorm)
 
@@ -405,6 +491,12 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
         if profiler_started:
             logger.info("NSYS capture stop: after chunk loop.")
             torch.cuda.cudart().cudaProfilerStop()
+        if save_executor is not None:
+            for fut in pending_saves:
+                result = fut.result()
+                if result is not None:
+                    rollout_actions.append(result)
+            save_executor.shutdown(wait=True)
 
     if num_chunks > 1 and not args.infer_action_only:
         save_mp4(rollout_frames, str(output_dir / f"{prefix}_rollout_pred.mp4"), fps=args.fps)
