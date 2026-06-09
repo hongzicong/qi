@@ -2,6 +2,7 @@
 from typing import Any
 from pathlib import Path
 
+import argparse
 import logging
 import torch
 from hydra import compose, initialize_config_dir
@@ -29,10 +30,18 @@ def dtype_from_mixed_precision(mixed_precision: str) -> torch.dtype:
 
 
 def load_config(
-        config_dir: str,
-        task: str,
-        mixed_precision: str,
-        dataset_stats: str) -> DictConfig:
+    config_dir: str | argparse.Namespace | None = None,
+    task: str | None = None,
+    mixed_precision: str | None = None,
+    dataset_stats: str | None = None,
+) -> DictConfig:
+    if isinstance(config_dir, argparse.Namespace):
+        args = config_dir
+        config_dir = args.config_dir
+        task = args.task
+        mixed_precision = args.mixed_precision
+        dataset_stats = args.dataset_stats
+
     config_dir = str(Path(config_dir).resolve())
     overrides = [f"task={task}", f"mixed_precision={mixed_precision}"]
     with initialize_config_dir(config_dir=config_dir, version_base="1.3"):
@@ -49,14 +58,14 @@ def load_config(
 
 
 def load_model(
-        ckpt: str,
-        device: str,
-        mixed_precision: str,
-        config_dir: str,
-        task: str,
-        dataset_stats: str,
-        torch_compile: bool = True,
-        no_cuda_graph: bool = False,
+    ckpt: str,
+    device: str,
+    mixed_precision: str,
+    config_dir: str,
+    task: str,
+    dataset_stats: str,
+    torch_compile: bool = False,
+    no_cuda_graph: bool = False,
 ) -> Any:
     cfg = load_config(config_dir, task, mixed_precision, dataset_stats)
     model_dtype = dtype_from_mixed_precision(mixed_precision)
@@ -84,7 +93,7 @@ def load_model(
     if not no_cuda_graph or torch_compile:
         model._setup_graph_mgr(torch_compile=torch_compile)
         if not no_cuda_graph:
-            logger.info("CUDA Graph enabled (wraps MoT body only)")
+            logger.info("CUDA Graph enabled (wraps VAE encode, prefill, and MoT body)")
         else:
             logger.info("CUDA Graph disabled, torch.compile only")
 
