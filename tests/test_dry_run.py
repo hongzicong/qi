@@ -359,8 +359,12 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
 
     save_executor: ThreadPoolExecutor | None = None
     pending_saves: list[Future[Any]] = []
+    # Dedicated CUDA stream for D2H copies so they don't block the default
+    # stream used by CUDA Graph replay in the next chunk.
+    d2h_stream: torch.cuda.Stream | None = None
     if async_save:
         save_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chunk-save")
+        d2h_stream = torch.cuda.Stream(device=model.device)
 
     def _save_chunk_outputs(
         chunk_idx_local: int,
@@ -368,13 +372,18 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
         input_image_cpu: torch.Tensor,
         action_tensor: torch.Tensor | None,
     ) -> torch.Tensor | None:
-        # Runs in the background thread. `input_image_cpu` is already on CPU; the
-        # action tensor may be on GPU (when async_save=True we deliberately delayed
-        # the D2H).  Calling `.cpu()` here blocks this worker thread but not the
-        # main loop, and CUDA serialises it correctly behind the chunk's denoise.
+        # Runs in the background thread. `input_image_cpu` is already on CPU.
+        # When async_save=True the action tensor is still on GPU; we perform
+        # the D2H copy on a *separate* CUDA stream (``d2h_stream``) that has
+        # already been ordered after the chunk's GPU work via an event.  This
+        # keeps the default stream free for the next chunk's CUDA Graph replay.
         save_image(input_image_cpu, output_dir / f"{chunk_prefix_local}_input.png")
+        action_cpu: torch.Tensor | np.ndarray | None = action_tensor
+        if action_tensor is not None and action_tensor.is_cuda and d2h_stream is not None:
+            with torch.cuda.stream(d2h_stream):
+                action_cpu = action_tensor.detach().to(device="cpu", dtype=torch.float32)
         return save_actions(
-            action_tensor,
+            action_cpu,
             output_dir=output_dir,
             prefix=chunk_prefix_local,
             processor=processor,
@@ -451,6 +460,14 @@ def run_file_source(args: argparse.Namespace, cfg: DictConfig, model: Any, outpu
 
             if async_save and save_executor is not None:
                 assert cached_input_cpu is not None
+                # Record an event on the default stream *after* this chunk's
+                # GPU work finishes, then order the D2H stream to wait on it.
+                # This guarantees the D2H copy sees correct data while running
+                # concurrently with the next chunk's GPU kernels.
+                assert d2h_stream is not None
+                d2h_event = torch.cuda.Event()
+                d2h_event.record(torch.cuda.default_stream(model.device))
+                d2h_stream.wait_event(d2h_event)
                 pending_saves.append(
                     save_executor.submit(
                         _save_chunk_outputs,
