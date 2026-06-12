@@ -86,6 +86,59 @@ def _build_int8_extension():
     return [ext], {"build_ext": BuildExtension}
 
 
+
+
+def _build_int4_w4a16_extension():
+    build_mode = os.environ.get("QI_BUILD_INT4_W4A16", "auto").lower()
+    if build_mode in {"0", "false", "off", "no"}:
+        return [], {}
+
+    src_dir = ROOT / "src" / "qi" / "quantization" / "csrc" / "int4_w4a16"
+    sources = [src_dir / "bindings.cpp", src_dir / "int4_w4a16_kernel.cu"]
+    missing = [path for path in sources if not path.exists()]
+    if missing:
+        message = (
+            "INT4 W4A16 sources were not found: "
+            + ", ".join(str(path) for path in missing)
+            + ". Expected sources under src/qi/quantization/csrc/int4_w4a16."
+        )
+        if build_mode in {"1", "true", "on", "yes"}:
+            raise RuntimeError(message)
+        print(f"warning: skipping Qi INT4 W4A16 CUDA extension: {message}")
+        return [], {}
+
+    try:
+        from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+    except Exception as exc:
+        if build_mode in {"1", "true", "on", "yes"}:
+            raise
+        print(f"warning: skipping Qi INT4 W4A16 CUDA extension: could not import torch CUDA extension support: {exc}")
+        return [], {}
+
+    os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.7;8.9")
+
+    try:
+        ext = CUDAExtension(
+            name="qi.quantization._int4_w4a16_ops",
+            sources=[str(path) for path in sources],
+            include_dirs=[str(src_dir)],
+            extra_compile_args={
+                "cxx": ["-O3", "-std=c++17"],
+                "nvcc": ["-O3", "--use_fast_math", "-std=c++17"],
+            },
+        )
+    except Exception as exc:
+        if _truthy(build_mode):
+            raise
+        print(f"warning: skipping Qi INT4 W4A16 CUDA extension: {exc}")
+        return [], {}
+
+    return [ext], {"build_ext": BuildExtension}
+
+
 ext_modules, cmdclass = _build_int8_extension()
+int4_ext_modules, int4_cmdclass = _build_int4_w4a16_extension()
+ext_modules += int4_ext_modules
+cmdclass.update(int4_cmdclass)
 
 setup(**_project_metadata(), ext_modules=ext_modules, cmdclass=cmdclass)

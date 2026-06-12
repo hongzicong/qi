@@ -72,8 +72,8 @@ def _stats_for_module(act_stats, name: str):
             return suffix_matches[0]
         examples = ", ".join(str(key) for key in list(act_stats.keys())[:5])
         raise ValueError(
-            f"Missing AWQ activation stats for module {name!r}. "
-            "Collect AWQ stats with the same --target-modules/--target-expert used for quantization. "
+            f"Missing AWQ/SmoothQuant calibration data for module {name!r}. "
+            "Collect calibration data with the same --target-modules/--target-expert used for quantization. "
             f"Available stats examples: {examples}"
         )
     return act_stats
@@ -142,6 +142,7 @@ def replace_linear_with_weight_only(
                 child.weight.detach(),
                 cfg=cfg,
                 act_stats=_stats_for_module(act_stats, full_name),
+                bias=child.bias.detach() if child.bias is not None else None,
             )
             qlinear = WeightOnlyLinear.from_linear(child, quantized, cfg=cfg, backend=backend)
             qlinear.train(child.training)
@@ -175,6 +176,24 @@ def prepare_model_for_weight_only_load(
             scales = torch.empty((out_features, num_groups), dtype=torch.float32)
             qweight_packed = None
             scale_factors = None
+            if getattr(cfg, "backend", None) == "int4_w4a16" or _state_has_key(
+                state_dict, container_key, full_name, "qweight_packed"
+            ):
+                qweight_packed = _state_empty_like(state_dict, container_key, full_name, "qweight_packed")
+                if qweight_packed is None:
+                    from .backends.int4_w4a16 import int4_w4a16_packed_shapes
+
+                    packed_shape, _ = int4_w4a16_packed_shapes(in_features, out_features, int(getattr(cfg, "group_size", -1)))
+                    qweight_packed = torch.empty(packed_shape, dtype=torch.int32)
+            if getattr(cfg, "backend", None) == "int4_w4a16" or _state_has_key(
+                state_dict, container_key, full_name, "scale_factors"
+            ):
+                scale_factors = _state_empty_like(state_dict, container_key, full_name, "scale_factors")
+                if scale_factors is None:
+                    from .backends.int4_w4a16 import int4_w4a16_packed_shapes
+
+                    _, scale_shape = int4_w4a16_packed_shapes(in_features, out_features, int(getattr(cfg, "group_size", -1)))
+                    scale_factors = torch.empty(scale_shape, dtype=torch.float16)
             weight_global_scale = None
             weight_fp8 = None
             weight_scale = None

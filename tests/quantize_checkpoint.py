@@ -56,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quant-dtype", choices=["int", "fp8"], default="int")
     parser.add_argument(
         "--quant-backend",
-        choices=["reference", "cuda_ext", "flashrt_fp8", "int8_w8a8"],
+        choices=["reference", "cuda_ext", "flashrt_fp8", "int8_w8a8", "int4_w4a16"],
         default="reference",
     )
     parser.add_argument("--quant-bits", type=int, default=8)
@@ -68,8 +68,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-quantize-ffn", action="store_true")
     parser.add_argument("--no-quantize-attn-proj", action="store_true")
     parser.add_argument("--keep-output-dtype", choices=["input", "fp16", "bf16", "fp32"], default="input")
-    parser.add_argument("--awq-alpha", type=float, default=0.5)
     parser.add_argument("--awq-scale-eps", type=float, default=1e-4)
+    parser.add_argument("--awq-n-grid", type=int, default=20)
+    parser.add_argument("--awq-max-calib-samples", type=int, default=256)
+    parser.add_argument("--no-awq-clip", action="store_true")
+    parser.add_argument("--awq-clip-n-grid", type=int, default=20)
+    parser.add_argument("--awq-clip-max-shrink", type=float, default=0.5)
+    parser.add_argument("--awq-clip-n-sample-token", type=int, default=512)
     parser.add_argument("--smoothquant-alpha", type=float, default=0.5)
     parser.add_argument("--smoothquant-scale-eps", type=float, default=1e-4)
     parser.add_argument("--activation-scale", type=float, default=1.0)
@@ -78,7 +83,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--awq-stats",
         default=None,
-        help="Path to torch-saved activation stats. Required for --quant-algo awq/smoothquant.",
+        help="Path to torch-saved calibration data. AWQ requires collect_awq_calibration_cache() output with input samples; SmoothQuant accepts activation stats.",
     )
     return parser.parse_args()
 
@@ -91,6 +96,12 @@ def configure_local_model_loading(args: argparse.Namespace) -> None:
     if args.skip_download:
         os.environ["DIFFSYNTH_SKIP_DOWNLOAD"] = "true"
         logger.info("DIFFSYNTH_SKIP_DOWNLOAD=true; missing pretrained files will not be downloaded.")
+
+
+def configure_checkpoint_model_loading(cfg) -> None:
+    cfg.model.skip_dit_load_from_pretrain = True
+    cfg.model.action_dit_pretrained_path = None
+    logger.info("Skipping pretrained DiT backbones; weights will be loaded from --ckpt.")
 
 
 def build_quant_config(args: argparse.Namespace) -> WeightOnlyQuantConfig | WeightActivationQuantConfig:
@@ -144,8 +155,13 @@ def build_quant_config(args: argparse.Namespace) -> WeightOnlyQuantConfig | Weig
         group_size=args.quant_group_size,
         symmetric=not args.quant_asymmetric,
         backend=args.quant_backend,
-        awq_alpha=args.awq_alpha,
         awq_scale_eps=args.awq_scale_eps,
+        awq_n_grid=args.awq_n_grid,
+        awq_max_calib_samples=args.awq_max_calib_samples,
+        awq_enable_clip=not args.no_awq_clip,
+        awq_clip_n_grid=args.awq_clip_n_grid,
+        awq_clip_max_shrink=args.awq_clip_max_shrink,
+        awq_clip_n_sample_token=args.awq_clip_n_sample_token,
     )
 
 
@@ -154,6 +170,7 @@ def main() -> None:
     setup_logging()
     configure_local_model_loading(args)
     cfg = load_config(args)
+    configure_checkpoint_model_loading(cfg)
     model_dtype = dtype_from_mixed_precision(args.mixed_precision)
     model = instantiate(cfg.model, model_dtype=model_dtype, device=args.device)
     source_payload = model.load_checkpoint(args.ckpt)

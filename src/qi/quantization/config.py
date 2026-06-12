@@ -26,7 +26,7 @@ class WeightOnlyQuantConfig:
     bits: int = 8
     group_size: int = 128
     symmetric: bool = True
-    backend: Literal["reference", "cuda_ext"] = "reference"
+    backend: Literal["reference", "cuda_ext", "int4_w4a16"] = "reference"
 
     target_expert: Literal["all", "both", "action", "video"] = "all"
     action_expert_markers: tuple[str, ...] = ("action_expert", "action")
@@ -38,8 +38,13 @@ class WeightOnlyQuantConfig:
 
     keep_output_dtype: Literal["input", "fp16", "bf16", "fp32"] = "input"
 
-    awq_alpha: float = 0.5
     awq_scale_eps: float = 1e-4
+    awq_n_grid: int = 20
+    awq_max_calib_samples: int = 256
+    awq_enable_clip: bool = True
+    awq_clip_n_grid: int = 20
+    awq_clip_max_shrink: float = 0.5
+    awq_clip_n_sample_token: int = 512
 
     def validate(self) -> None:
         if self.quant_dtype != "int":
@@ -51,8 +56,29 @@ class WeightOnlyQuantConfig:
             raise ValueError(f"`bits` must be 4 or 8, got {self.bits}.")
         if self.group_size == 0 or self.group_size < -1:
             raise ValueError(f"`group_size` must be positive or -1, got {self.group_size}.")
-        if not 0.0 <= float(self.awq_alpha) <= 1.0:
-            raise ValueError(f"`awq_alpha` must be in [0, 1], got {self.awq_alpha}.")
+        if self.backend == "int4_w4a16":
+            if self.bits != 4:
+                raise ValueError(f"INT4 W4A16 backend requires bits=4, got {self.bits}.")
+            if not self.symmetric:
+                raise ValueError("INT4 W4A16 backend requires symmetric quantization.")
+            if self.group_size not in (-1, 128):
+                raise ValueError(f"INT4 W4A16 backend requires group_size=-1 or 128, got {self.group_size}.")
+        if int(self.awq_n_grid) <= 0:
+            raise ValueError(f"`awq_n_grid` must be positive, got {self.awq_n_grid}.")
+        if int(self.awq_max_calib_samples) <= 0:
+            raise ValueError(
+                f"`awq_max_calib_samples` must be positive, got {self.awq_max_calib_samples}."
+            )
+        if int(self.awq_clip_n_grid) <= 0:
+            raise ValueError(f"`awq_clip_n_grid` must be positive, got {self.awq_clip_n_grid}.")
+        if not 0.0 <= float(self.awq_clip_max_shrink) < 1.0:
+            raise ValueError(
+                f"`awq_clip_max_shrink` must be in [0, 1), got {self.awq_clip_max_shrink}."
+            )
+        if int(self.awq_clip_n_sample_token) <= 0:
+            raise ValueError(
+                f"`awq_clip_n_sample_token` must be positive, got {self.awq_clip_n_sample_token}."
+            )
 
 
 @dataclass

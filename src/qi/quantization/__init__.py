@@ -1,4 +1,4 @@
-from .calibration import collect_awq_activation_stats
+from .calibration import collect_awq_activation_stats, collect_awq_calibration_cache
 from .checkpoint import (
     checkpoint_is_quantized,
     load_checkpoint_payload,
@@ -28,6 +28,7 @@ __all__ = [
     "WeightOnlyQuantConfig",
     "checkpoint_is_quantized",
     "collect_awq_activation_stats",
+    "collect_awq_calibration_cache",
     "dequantize_weight",
     "load_checkpoint_payload",
     "prepare_model_for_quantized_checkpoint",
