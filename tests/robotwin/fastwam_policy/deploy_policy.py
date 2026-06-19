@@ -166,6 +166,18 @@ class WorldActionRobotWinPolicy:
         model_cfg_copy.load_text_encoder = True
 
         self.model = instantiate(model_cfg_copy, model_dtype=model_dtype, device=device)
+        
+        # Process Quantization Checkpoint
+        from qi.quantization import (
+            checkpoint_is_quantized, load_checkpoint_payload,
+            prepare_model_for_quantized_checkpoint,
+        )
+        payload = load_checkpoint_payload(checkpoint_path)
+        if checkpoint_is_quantized(payload):
+            quant_cfg = prepare_model_for_quantized_checkpoint(self.model, payload)
+            logger.info("Loaded quantized checkpoint: algo=%s bits=%s backend=%s",
+                        quant_cfg.algo, quant_cfg.bits, quant_cfg.backend)
+        
         self.model.load_checkpoint(checkpoint_path)
         self.model = self.model.to(device).eval()
         if cuda_graph or torch_compile:
