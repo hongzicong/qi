@@ -18,6 +18,12 @@ wam:
   num_inference_steps: 10                                                                         # flow-matching denoising steps; smaller = faster, lower quality
   seed: 42                                                                                        # RNG seed for noise sampling
   rand_device: "cpu"                                                                              # device for noise tensor (cpu for reproducibility)
+  expert_cache: true                                                                              # enable fixed-step action DiT body residual caching
+  expert_cache_reuse_steps: 1                                                                     # adjacent denoising steps that reuse cached body residual
+  expert_cache_warmup_steps: 1                                                                    # initial denoising steps that always compute the DiT body
+  expert_cache_cooldown_steps: 1                                                                  # final denoising steps that always compute the DiT body
+  cuda_graph: true                                                                                # enable CUDA Graph setup for FastWAM action inference
+  torch_compile: true                                                                             # enable torch.compile when setting up inference graph managers
 
 policy_server:
   host: "127.0.0.1"                                                                               # RPC server bind address
