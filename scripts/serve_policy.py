@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 
 from omegaconf import OmegaConf
@@ -18,6 +19,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--authkey", default="wam")
+    parser.add_argument("--expert-cache", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--cuda-graph", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--torch-compile", action=argparse.BooleanOptionalAction, default=None)
     return parser.parse_args()
 
 
@@ -28,6 +32,17 @@ def main() -> None:
     if not isinstance(payload, dict):
         raise ValueError(f"Expected mapping config in {config_path}")
     policy_config = WAMPolicyConfig.from_mapping(payload, base_dir=config_path.parent)
+    overrides = {
+        key: value
+        for key, value in {
+            "expert_cache": args.expert_cache,
+            "cuda_graph": args.cuda_graph,
+            "torch_compile": args.torch_compile,
+        }.items()
+        if value is not None
+    }
+    if overrides:
+        policy_config = replace(policy_config, **overrides)
     serve_wam_policy(policy_config, host=args.host, port=args.port, authkey=args.authkey)
 
 

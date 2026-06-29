@@ -69,6 +69,25 @@ def load_model(
 ) -> Any:
     cfg = load_config(config_dir, task, mixed_precision, dataset_stats)
     model_dtype = dtype_from_mixed_precision(mixed_precision)
+    return load_model_from_config(
+        cfg=cfg,
+        ckpt=ckpt,
+        device=device,
+        model_dtype=model_dtype,
+        torch_compile=torch_compile,
+        cuda_graph=not no_cuda_graph,
+    )
+
+
+def load_model_from_config(
+    cfg: DictConfig,
+    ckpt: str,
+    device: str,
+    model_dtype: torch.dtype,
+    torch_compile: bool = False,
+    cuda_graph: bool = True,
+) -> Any:
+    "Instantiate WAM from an already-resolved config and attach inference backends."
     model = instantiate(cfg.model, model_dtype=model_dtype, device=device)
     model.cfg = cfg
 
@@ -90,9 +109,9 @@ def load_model(
         logging.getLogger("torch._dynamo").setLevel(logging.WARNING)
         logger.info("torch.compile enabled on MoT body forward (Inductor, default mode)")
 
-    if not no_cuda_graph or torch_compile:
+    if cuda_graph or torch_compile:
         model._setup_graph_mgr(torch_compile=torch_compile)
-        if not no_cuda_graph:
+        if cuda_graph:
             logger.info("CUDA Graph enabled (wraps VAE encode, prefill, and MoT body)")
         else:
             logger.info("CUDA Graph disabled, torch.compile only")

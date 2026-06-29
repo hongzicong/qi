@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,7 @@ from PIL import Image
 from qi.datasets.dataset_utils import CenterCrop, ResizeSmallestSideAspectPreserving
 from qi.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
 from qi.datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
+from qi.api import load_model_from_config
 from qi.utils.config_resolvers import register_default_resolvers
 
 register_default_resolvers()
@@ -45,6 +47,12 @@ class WAMPolicyConfig:
     num_inference_steps: int = 10
     seed: int = 42
     rand_device: str = "cpu"
+    expert_cache: bool = False
+    expert_cache_reuse_steps: int = 1
+    expert_cache_warmup_steps: int = 1
+    expert_cache_cooldown_steps: int = 1
+    cuda_graph: bool = False
+    torch_compile: bool = False
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any], base_dir: str | Path | None = None) -> "WAMPolicyConfig":
@@ -59,6 +67,12 @@ class WAMPolicyConfig:
 
         def get(name: str, default: Any = None) -> Any:
             return raw[name] if name in raw else default
+
+        def bool_value(name: str, default: bool = False) -> bool:
+            value = get(name, default)
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+            return bool(value)
 
         def path_value(name: str, required: bool = False) -> str | None:
             value = get(name)
@@ -81,11 +95,17 @@ class WAMPolicyConfig:
             mixed_precision=str(get("mixed_precision", cls.mixed_precision)),
             prompt=str(get("prompt", cls.prompt)),
             context_cache_dir=path_value("context_cache_dir"),
-            use_text_encoder=bool(get("use_text_encoder", cls.use_text_encoder)),
+            use_text_encoder=bool_value("use_text_encoder", cls.use_text_encoder),
             action_horizon=int(get("action_horizon", cls.action_horizon)),
             num_inference_steps=int(get("num_inference_steps", cls.num_inference_steps)),
             seed=int(get("seed", cls.seed)),
             rand_device=str(get("rand_device", cls.rand_device)),
+            expert_cache=bool_value("expert_cache", cls.expert_cache),
+            expert_cache_reuse_steps=int(get("expert_cache_reuse_steps", cls.expert_cache_reuse_steps)),
+            expert_cache_warmup_steps=int(get("expert_cache_warmup_steps", cls.expert_cache_warmup_steps)),
+            expert_cache_cooldown_steps=int(get("expert_cache_cooldown_steps", cls.expert_cache_cooldown_steps)),
+            cuda_graph=bool_value("cuda_graph", cls.cuda_graph),
+            torch_compile=bool_value("torch_compile", cls.torch_compile),
         )
 
 
@@ -105,9 +125,14 @@ class WAMPolicyClient:
         self.config = config if isinstance(config, WAMPolicyConfig) else WAMPolicyConfig.from_mapping(config)
         self.cfg = self._load_config()
         model_dtype = dtype_from_mixed_precision(self.config.mixed_precision)
-        self.model = instantiate(self.cfg.model, model_dtype=model_dtype, device=self.config.device)
-        self.model.load_checkpoint(self.config.ckpt)
-        self.model.eval()
+        self.model = load_model_from_config(
+            cfg=self.cfg,
+            ckpt=self.config.ckpt,
+            device=self.config.device,
+            model_dtype=model_dtype,
+            torch_compile=self.config.torch_compile,
+            cuda_graph=self.config.cuda_graph,
+        )
 
         self.processor = instantiate(self.cfg.data.train.processor)
         stats = load_dataset_stats_from_json(self.config.dataset_stats)
@@ -152,18 +177,34 @@ class WAMPolicyClient:
         image = preprocess_real_images(self.observation, self.model.device, self.model.torch_dtype)
         proprio = normalize_proprio(self.processor, self.observation.state)
 
-        with torch.no_grad():
-            output = self.model.infer_action(
-                prompt=prompt,
-                input_image=image,
-                proprio=proprio,
-                context=context,
-                context_mask=context_mask,
-                action_horizon=self.config.action_horizon,
-                num_inference_steps=self.config.num_inference_steps,
-                seed=self.config.seed,
-                rand_device=self.config.rand_device,
+        infer_kwargs = {
+            "prompt": prompt,
+            "input_image": image,
+            "proprio": proprio,
+            "context": context,
+            "context_mask": context_mask,
+            "action_horizon": self.config.action_horizon,
+            "num_inference_steps": self.config.num_inference_steps,
+            "seed": self.config.seed,
+            "rand_device": self.config.rand_device,
+        }
+        infer_params = inspect.signature(self.model.infer_action).parameters
+        if "num_video_frames" in infer_params:
+            infer_kwargs["num_video_frames"] = default_num_video_frames(self.cfg)
+        if "expert_cache" in infer_params:
+            infer_kwargs.update(
+                {
+                    "expert_cache": self.config.expert_cache,
+                    "expert_cache_reuse_steps": self.config.expert_cache_reuse_steps,
+                    "expert_cache_warmup_steps": self.config.expert_cache_warmup_steps,
+                    "expert_cache_cooldown_steps": self.config.expert_cache_cooldown_steps,
+                }
             )
+        if "cuda_graph" in infer_params:
+            infer_kwargs["cuda_graph"] = self.config.cuda_graph
+
+        with torch.no_grad():
+            output = self.model.infer_action(**infer_kwargs)
 
         actions = denormalize_actions(self.processor, output["action"])
         return actions.detach().cpu().numpy().astype(np.float32)
@@ -216,6 +257,12 @@ def dtype_from_mixed_precision(mixed_precision: str) -> torch.dtype:
 
 def format_prompt(task_prompt: str) -> str:
     return DEFAULT_PROMPT.format(task=task_prompt)
+
+
+def default_num_video_frames(cfg: DictConfig) -> int:
+    num_frames = int(cfg.data.train.num_frames)
+    ratio = int(cfg.data.train.get("action_video_freq_ratio", 1))
+    return ((num_frames - 1) // ratio) + 1
 
 
 def load_cached_context(cache_dir: str | Path, formatted_prompt: str, context_len: int) -> tuple[torch.Tensor, torch.Tensor]:

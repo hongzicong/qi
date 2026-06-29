@@ -4,20 +4,26 @@
 # FastWAMPolicyConfig loader.
 
 wam:
-  ckpt: "../checkpoints/pick_1_cup_aug_ego/step_020000.pt"                                        # model weights to load (step_xxxxxx.pt). Use relative paths instead of absolute paths everywhere.
-  dataset_stats: "../checkpoints/pick_1_cup_aug_ego/dataset_stats.json"                           # state/action normalization stats from training
+  ckpt: "../checkpoints/fastwam_real_checkpoint/step_020000.pt"                                   # model weights to load (step_xxxxxx.pt); relative to this yaml -> <repo>/checkpoints/...
+  dataset_stats: "../checkpoints/fastwam_real_checkpoint/dataset_stats.json"                      # state/action normalization stats; relative to this yaml -> <repo>/checkpoints/...
   task: "real_cleaning_uncond_3cam_384_1e-4"                                                      # Hydra task name (used only if train_config is null)
   config_dir: "."                                                                                 # Hydra config root, relative to this yaml
-  train_config: "../checkpoints/pick_1_cup_aug_ego/config.yaml"                                                             # saved training config (14-dim/dual, must match the loaded ckpt); if set, bypasses Hydra compose
+  train_config: null                                                           # saved training config (14-dim/dual, must match the loaded ckpt); if set, bypasses Hydra compose
   device: "cuda:0"                                                                                # device for model inference
   mixed_precision: "bf16"                                                                         # model dtype: "no" | "fp16" | "bf16"
-  prompt: "With the right arm, pick up the orange cup and place it into the white bowl. The left arm stays still."    # text instruction; sha256 must match a file in context_cache_dir
-  context_cache_dir: "../data/text_embeds_cache/pick_1_cup"                                         # dir of precomputed T5 embeddings (<sha256>.t5_lenN.<enc>.pt)
+  prompt: "Stack the three cups into a small tower."    # text instruction; sha256 must match a file in context_cache_dir
+  context_cache_dir: "../checkpoints/text_embeds_cache/stack_3_cups_gen"                                # dir of precomputed T5 embeddings (<sha256>.t5_lenN.<enc>.pt); relative to this yaml -> <repo>/checkpoints/...
   use_text_encoder: false                                                                         # false=read from cache; true=run T5 inline (slow + needs T5 in VRAM)
   action_horizon: 32                                                                              # # of future actions predicted per inference call (chunk length)
   num_inference_steps: 10                                                                         # flow-matching denoising steps; smaller = faster, lower quality
   seed: 42                                                                                        # RNG seed for noise sampling
-  rand_device: "cpu"                                                                              # device for noise tensor (cpu for reproducibility)
+  rand_device: "cpu"                                                                            # device for noise tensor (cpu for reproducibility)
+  expert_cache: false                                                                              # enable fixed-step action DiT body residual caching
+  expert_cache_reuse_steps: 1                                                                     # adjacent denoising steps that reuse cached body residual
+  expert_cache_warmup_steps: 1                                                                    # initial denoising steps that always compute the DiT body
+  expert_cache_cooldown_steps: 1                                                                  # final denoising steps that always compute the DiT body
+  cuda_graph: true                                                                                # enable CUDA Graph setup for FastWAM action inference
+  torch_compile: true                                                                             # enable torch.compile when setting up inference graph managers
 
 policy_server:
   host: "127.0.0.1"                                                                               # RPC server bind address
@@ -51,8 +57,10 @@ robot:
   # right_init_position: [0.15575747, 0.60794085, -0.568343, 0.21675915, 1.1470476, 0.06770016, -0.0026]
   #left_init_position:  [-0.3079215, 1.2350178, -0.45439875, -0.09330796, -0.15022773, 0.04931419, -0.0049]   # 7-dim [j0..j5, gripper] for left Piper, position for pick_number
   #right_init_position: [0.60563827, 0.67733306, -0.4182199, -0.23146443, 0.10942622, 0.11945651, -0.0024]    # 7-dim [j0..j5, gripper] for right Piper, position for pick_number
-  left_init_position:  [-0.4073, 0.7073, -0.5687, 0.1449, 1.0449, -0.1613, 0.0005]  # 7-dim [j0..j5, gripper] for left Piper, position for pick_1_cup
-  right_init_position: [0.5243, 1.1371, -0.7563, 0.0920, 1.1579, 0.0547, -0.0003] # 7-dim [j0..j5, gripper] for right Piper, position for pick_1_cup
+  # left_init_position:  [-0.4073, 0.7073, -0.5687, 0.1449, 1.0449, -0.1613, 0.0005]  # 7-dim [j0..j5, gripper] for left Piper, position for pick_1_cup
+  # right_init_position: [0.5243, 1.1371, -0.7563, 0.0920, 1.1579, 0.0547, -0.0003] # 7-dim [j0..j5, gripper] for right Piper, position for pick_1_cup
+  left_init_position: [-0.75764, 1.03441, -0.74778, 0.03059, 0.93736, -0.07892, 0.06808]
+  right_init_position: [0.63639, 1.00319, -0.71547, 0.01034, 1.02991, 0.19950, 0.06644]
 
 
 cameras:
